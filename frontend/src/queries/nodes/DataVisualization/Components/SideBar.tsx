@@ -6,6 +6,7 @@ import { useActions, useValues } from 'kea'
 import { ChartDisplayType } from '~/types'
 
 import { dataVisualizationLogic, SideBarTab } from '../dataVisualizationLogic'
+import { ConditionalFormattingTab } from './ConditionalFormatting/ConditionalFormattingTab'
 import { DisplayTab } from './DisplayTab'
 import { SeriesTab } from './SeriesTab'
 
@@ -21,10 +22,16 @@ const TABS_TO_CONTENT: Record<SideBarTab, TabContent> = {
         content: <SeriesTab />,
         shouldShow: (): boolean => true,
     },
+    [SideBarTab.ConditionalFormatting]: {
+        label: 'Conditional formatting',
+        content: <ConditionalFormattingTab />,
+        shouldShow: (displayType: ChartDisplayType): boolean => displayType === ChartDisplayType.ActionsTable,
+    },
     [SideBarTab.Display]: {
         label: 'Display',
         content: <DisplayTab />,
-        shouldShow: (displayType: ChartDisplayType): boolean => displayType !== ChartDisplayType.ActionsTable,
+        shouldShow: (displayType: ChartDisplayType): boolean =>
+            displayType !== ChartDisplayType.ActionsTable && displayType !== ChartDisplayType.BoldNumber,
     },
 }
 

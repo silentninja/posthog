@@ -1,7 +1,7 @@
 import { closestCenter, DndContext } from '@dnd-kit/core'
 import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { IconGear, IconLock, IconPlus, IconTrash, IconX } from '@posthog/icons'
+import { IconGear, IconInfo, IconLock, IconPlus, IconTrash, IconX } from '@posthog/icons'
 import {
     LemonButton,
     LemonCheckbox,
@@ -47,7 +47,7 @@ function JsonConfigField(props: {
     autoFocus?: boolean
     value?: string
 }): JSX.Element {
-    const { exampleInvocationGlobalsWithInputs } = useValues(hogFunctionConfigurationLogic)
+    const { globalsWithInputs } = useValues(hogFunctionConfigurationLogic)
     return (
         <CodeEditorResizeable
             language="hogJson"
@@ -63,13 +63,13 @@ function JsonConfigField(props: {
                     verticalScrollbarSize: 0,
                 },
             }}
-            globals={exampleInvocationGlobalsWithInputs}
+            globals={globalsWithInputs}
         />
     )
 }
 
 function EmailTemplateField({ schema }: { schema: HogFunctionInputSchemaType }): JSX.Element {
-    const { exampleInvocationGlobalsWithInputs, logicProps } = useValues(hogFunctionConfigurationLogic)
+    const { globalsWithInputs, logicProps } = useValues(hogFunctionConfigurationLogic)
 
     return (
         <>
@@ -78,15 +78,15 @@ function EmailTemplateField({ schema }: { schema: HogFunctionInputSchemaType }):
                 formLogicProps={logicProps}
                 formKey="configuration"
                 formFieldsPrefix={`inputs.${schema.key}.value`}
-                globals={exampleInvocationGlobalsWithInputs}
+                globals={globalsWithInputs}
             />
         </>
     )
 }
 
 function HogFunctionTemplateInput(props: Omit<CodeEditorInlineProps, 'globals'>): JSX.Element {
-    const { exampleInvocationGlobalsWithInputs } = useValues(hogFunctionConfigurationLogic)
-    return <CodeEditorInline {...props} globals={exampleInvocationGlobalsWithInputs} />
+    const { globalsWithInputs } = useValues(hogFunctionConfigurationLogic)
+    return <CodeEditorInline {...props} globals={globalsWithInputs} />
 }
 
 function DictionaryField({ onChange, value }: { onChange?: (value: any) => void; value: any }): JSX.Element {
@@ -344,8 +344,11 @@ export function HogFunctionInputWithSchema({ schema }: HogFunctionInputWithSchem
         }
     }, [showSource])
 
+    const supportsTemplating = ['string', 'json', 'dictionary', 'email'].includes(schema.type)
+
     return (
         <div
+            className="group"
             ref={setNodeRef}
             // eslint-disable-next-line react/forbid-dom-props
             style={{
@@ -378,20 +381,32 @@ export function HogFunctionInputWithSchema({ schema }: HogFunctionInputWithSchem
                                             </Tooltip>
                                         ) : undefined}
                                     </LemonLabel>
-                                    {showSource ? (
-                                        <>
-                                            <LemonTag type="muted" className="font-mono">
-                                                inputs.{schema.key}
-                                            </LemonTag>
-                                            <div className="flex-1" />
-                                            <LemonButton
-                                                size="small"
-                                                noPadding
-                                                icon={<IconGear />}
-                                                onClick={() => setEditing(true)}
-                                            />
-                                        </>
-                                    ) : null}
+                                    {showSource && (
+                                        <LemonTag type="muted" className="font-mono">
+                                            inputs.{schema.key}
+                                        </LemonTag>
+                                    )}
+                                    <div className="flex-1" />
+
+                                    {supportsTemplating && (
+                                        <LemonButton
+                                            size="xsmall"
+                                            to="https://posthog.com/docs/cdp/destinations#input-formatting"
+                                            sideIcon={<IconInfo />}
+                                            noPadding
+                                            className=" opacity-0 group-hover:opacity-100 p-1 transition-opacity"
+                                        >
+                                            Supports templating
+                                        </LemonButton>
+                                    )}
+                                    {showSource && (
+                                        <LemonButton
+                                            size="small"
+                                            noPadding
+                                            icon={<IconGear />}
+                                            onClick={() => setEditing(true)}
+                                        />
+                                    )}
                                 </div>
                                 {value?.secret ? (
                                     <div className="border border-dashed rounded p-1 flex gap-2 items-center">

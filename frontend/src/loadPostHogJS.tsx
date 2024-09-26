@@ -21,6 +21,7 @@ export function loadPostHogJS(): void {
         posthog.init(
             window.JS_POSTHOG_API_KEY,
             configWithSentry({
+                opt_out_useragent_filter: window.location.hostname === 'localhost', // we ARE a bot when running in localhost, so we need to enable this opt-out
                 api_host: window.JS_POSTHOG_HOST,
                 ui_host: window.JS_POSTHOG_UI_HOST,
                 rageclick: true,
@@ -49,6 +50,10 @@ export function loadPostHogJS(): void {
                 _onCapture: (window as any)._cypress_posthog_captures
                     ? (_, event) => (window as any)._cypress_posthog_captures.push(event)
                     : undefined,
+
+                session_recording: {
+                    compress_events: true,
+                },
             })
         )
 

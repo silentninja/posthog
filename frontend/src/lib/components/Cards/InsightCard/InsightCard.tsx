@@ -11,6 +11,7 @@ import { insightLogic } from 'scenes/insights/insightLogic'
 import { ErrorBoundary } from '~/layout/ErrorBoundary'
 import { themeLogic } from '~/layout/navigation-3000/themeLogic'
 import { Query } from '~/queries/Query/Query'
+import { DashboardFilter } from '~/queries/schema'
 import {
     DashboardBasicType,
     DashboardPlacement,
@@ -33,8 +34,6 @@ export interface InsightCardProps extends Resizeable, React.HTMLAttributes<HTMLD
     loadingQueued?: boolean
     /** Whether the insight is loading. */
     loading?: boolean
-    /** Whether the insight likely showing stale data. */
-    stale?: boolean
     /** Whether an error occurred on the server. */
     apiErrored?: boolean
     /** Whether the card should be highlighted with a blue border. */
@@ -62,6 +61,8 @@ export interface InsightCardProps extends Resizeable, React.HTMLAttributes<HTMLD
     /** Priority for loading the insight, lower is earlier. */
     loadPriority?: number
     doNotLoad?: boolean
+    /** Dashboard filters to override the ones in the insight */
+    filtersOverride?: DashboardFilter
 }
 
 function InsightCardInternal(
@@ -71,7 +72,6 @@ function InsightCardInternal(
         ribbonColor,
         loadingQueued,
         loading,
-        stale,
         apiErrored,
         timedOut,
         highlighted,
@@ -93,6 +93,7 @@ function InsightCardInternal(
         placement,
         loadPriority,
         doNotLoad,
+        filtersOverride,
         ...divProps
     }: InsightCardProps,
     ref: React.Ref<HTMLDivElement>
@@ -124,7 +125,7 @@ function InsightCardInternal(
             style={{ ...(divProps?.style ?? {}), ...(theme?.boxStyle ?? {}) }}
             ref={ref}
         >
-            <ErrorBoundary>
+            <ErrorBoundary tags={{ feature: 'insight' }}>
                 <BindLogic logic={insightLogic} props={insightLogicProps}>
                     <InsightMeta
                         insight={insight}
@@ -144,6 +145,7 @@ function InsightCardInternal(
                         showEditingControls={showEditingControls}
                         showDetailsControls={showDetailsControls}
                         moreButtons={moreButtons}
+                        filtersOverride={filtersOverride}
                     />
                     <div className="InsightCard__viz">
                         <Query
@@ -152,9 +154,9 @@ function InsightCardInternal(
                             context={{
                                 insightProps: insightLogicProps,
                             }}
-                            stale={stale}
                             readOnly
                             embedded
+                            inSharedMode={placement === DashboardPlacement.Public}
                         />
                     </div>
                 </BindLogic>

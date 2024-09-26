@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timedelta, UTC
 from unittest.mock import ANY, patch, MagicMock, call
 from urllib.parse import urlencode
+from typing import cast
 
 from parameterized import parameterized
 from dateutil.parser import parse
@@ -23,6 +24,7 @@ from posthog.models.team import Team
 from posthog.session_recordings.queries.test.session_replay_sql import (
     produce_replay_summary,
 )
+from posthog.models.property import Property
 from posthog.test.base import (
     APIBaseTest,
     ClickhouseTestMixin,
@@ -171,11 +173,17 @@ class TestSessionRecordings(APIBaseTest, ClickhouseTestMixin, QueryMatchingTest)
     def test_console_log_filters_are_correctly_passed_to_listing(self, mock_summary_lister):
         mock_summary_lister.return_value.run.return_value = ([], False)
 
-        self.client.get(f'/api/projects/{self.team.id}/session_recordings?console_logs=["warn", "error"]')
+        params_string = urlencode(
+            {
+                "console_log_filters": '[{"key": "console_log_level", "value": ["warn", "error"], "operator": "exact", "type": "recording"}]'
+            }
+        )
+        self.client.get(f"/api/projects/{self.team.id}/session_recordings?{params_string}")
 
         assert len(mock_summary_lister.call_args_list) == 1
         filter_passed_to_mock: SessionRecordingsFilter = mock_summary_lister.call_args_list[0].kwargs["filter"]
-        assert filter_passed_to_mock.console_logs_filter == ["warn", "error"]
+        console_filter = cast(Property, filter_passed_to_mock.console_log_filters.values[0])
+        assert console_filter.value == ["warn", "error"]
 
     @snapshot_postgres_queries
     def test_listing_recordings_is_not_nplus1_for_persons(self):
@@ -257,6 +265,7 @@ class TestSessionRecordings(APIBaseTest, ClickhouseTestMixin, QueryMatchingTest)
                 "start_url": "https://not-provided-by-test.com",
                 "storage": "object_storage",
                 "viewed": False,
+                "ongoing": True,
             },
         ]
 
@@ -275,44 +284,27 @@ class TestSessionRecordings(APIBaseTest, ClickhouseTestMixin, QueryMatchingTest)
 
         assert [r["person"]["id"] for r in response_data["results"]] == [p.pk, p.pk]
 
-    def test_viewed_state_of_session_recording_version_1(self):
+    def test_viewed_state_of_session_recording_version(self):
         Person.objects.create(
             team=self.team,
             distinct_ids=["u1"],
             properties={"$some_prop": "something", "email": "bob@bob.com"},
         )
         base_time = (now() - timedelta(days=1)).replace(microsecond=0)
-        SessionRecordingViewed.objects.create(team=self.team, user=self.user, session_id="1")
-        self.produce_replay_summary("u1", "1", base_time)
-        self.produce_replay_summary("u1", "2", base_time + relativedelta(seconds=30))
-        response = self.client.get(f"/api/projects/{self.team.id}/session_recordings")
-        response_data = response.json()
-        self.assertEqual(len(response_data["results"]), 2)
-        self.assertEqual(response_data["results"][0]["id"], "2")
-        self.assertEqual(response_data["results"][0]["viewed"], False)
-        self.assertEqual(response_data["results"][1]["id"], "1")
-        self.assertEqual(response_data["results"][1]["viewed"], True)
-
-    def test_viewed_state_of_session_recording_version_3(self):
-        Person.objects.create(
-            team=self.team,
-            distinct_ids=["u1"],
-            properties={"$some_prop": "something", "email": "bob@bob.com"},
+        SessionRecordingViewed.objects.create(
+            team=self.team, user=self.user, session_id="test_viewed_state_of_session_recording_version-1"
         )
-        base_time = (now() - timedelta(days=1)).replace(microsecond=0)
-        session_id_one = "1"
-        session_id_two = "2"
-
-        SessionRecordingViewed.objects.create(team=self.team, user=self.user, session_id=session_id_one)
-        self.produce_replay_summary("u1", session_id_one, base_time)
-        self.produce_replay_summary("u1", session_id_two, base_time + relativedelta(seconds=30))
+        self.produce_replay_summary("u1", "test_viewed_state_of_session_recording_version-1", base_time)
+        self.produce_replay_summary(
+            "u1", "test_viewed_state_of_session_recording_version-2", base_time + relativedelta(seconds=30)
+        )
 
         response = self.client.get(f"/api/projects/{self.team.id}/session_recordings")
         response_data = response.json()
 
         assert [(r["id"], r["viewed"]) for r in response_data["results"]] == [
-            (session_id_two, False),
-            (session_id_one, True),
+            ("test_viewed_state_of_session_recording_version-2", False),
+            ("test_viewed_state_of_session_recording_version-1", True),
         ]
 
     def test_setting_viewed_state_of_session_recording(self):
@@ -416,6 +408,7 @@ class TestSessionRecordings(APIBaseTest, ClickhouseTestMixin, QueryMatchingTest)
             },
             "storage": "object_storage",
             "snapshot_source": "web",
+            "ongoing": None,
         }
 
     def test_single_session_recording_doesnt_leak_teams(self):

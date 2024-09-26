@@ -1,3 +1,4 @@
+from typing import Any, Optional
 import dlt
 from dlt.sources.helpers.rest_client.paginators import BasePaginator
 from dlt.sources.helpers.requests import Response, Request
@@ -6,12 +7,12 @@ from posthog.temporal.data_imports.pipelines.rest_source.typing import EndpointR
 from posthog.temporal.data_imports.pipelines.salesforce.auth import SalseforceAuth
 
 
-def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointResource:
+def get_resource(name: str, is_incremental: bool) -> EndpointResource:
     resources: dict[str, EndpointResource] = {
         "User": {
             "name": "User",
             "table_name": "user",
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
             "write_disposition": "replace",
             "endpoint": {
                 "data_selector": "records",
@@ -25,7 +26,7 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
         "UserRole": {
             "name": "UserRole",
             "table_name": "user_role",
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
             "write_disposition": "replace",
             "endpoint": {
                 "data_selector": "records",
@@ -39,7 +40,7 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
         "Lead": {
             "name": "Lead",
             "table_name": "lead",
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
             "write_disposition": "replace",
             "endpoint": {
                 "data_selector": "records",
@@ -53,7 +54,7 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
         "Contact": {
             "name": "Contact",
             "table_name": "contact",
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
             "write_disposition": "replace",
             "endpoint": {
                 "data_selector": "records",
@@ -67,7 +68,7 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
         "Campaign": {
             "name": "Campaign",
             "table_name": "campaign",
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
             "write_disposition": "replace",
             "endpoint": {
                 "data_selector": "records",
@@ -81,7 +82,7 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
         "Product2": {
             "name": "Product2",
             "table_name": "product2",
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
             "write_disposition": "replace",
             "endpoint": {
                 "data_selector": "records",
@@ -95,7 +96,7 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
         "Pricebook2": {
             "name": "Pricebook2",
             "table_name": "pricebook2",
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
             "write_disposition": "replace",
             "endpoint": {
                 "data_selector": "records",
@@ -109,7 +110,7 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
         "PricebookEntry": {
             "name": "PricebookEntry",
             "table_name": "pricebook_entry",
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
             "write_disposition": "replace",
             "endpoint": {
                 "data_selector": "records",
@@ -120,10 +121,24 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
             },
             "table_format": "delta",
         },
+        "Order": {
+            "name": "Order",
+            "table_name": "order",
+            **({"primary_key": "id"} if is_incremental else {}),
+            "write_disposition": "replace",
+            "endpoint": {
+                "data_selector": "records",
+                "path": "/services/data/v61.0/query",
+                "params": {
+                    "q": "SELECT FIELDS(STANDARD) FROM Order",
+                },
+            },
+            "table_format": "delta",
+        },
         "Account": {
             "name": "Account",
             "table_name": "account",
-            "primary_key": "Id",
+            **({"primary_key": "Id"} if is_incremental else {}),
             "write_disposition": {
                 "disposition": "merge",
                 "strategy": "upsert",
@@ -153,11 +168,11 @@ def get_resource(name: str, is_incremental: bool, subdomain: str) -> EndpointRes
 
 
 class SalesforceEndpointPaginator(BasePaginator):
-    def __init__(self, subdomain):
+    def __init__(self, instance_url):
         super().__init__()
-        self.subdomain = subdomain
+        self.instance_url = instance_url
 
-    def update_state(self, response: Response) -> None:
+    def update_state(self, response: Response, data: Optional[list[Any]] = None) -> None:
         res = response.json()
 
         self._next_page = None
@@ -173,12 +188,12 @@ class SalesforceEndpointPaginator(BasePaginator):
             self._has_next_page = False
 
     def update_request(self, request: Request) -> None:
-        request.url = f"https://{self.subdomain}.my.salesforce.com{self._next_page}"
+        request.url = f"{self.instance_url}{self._next_page}"
 
 
 @dlt.source(max_table_nesting=0)
 def salesforce_source(
-    subdomain: str,
+    instance_url: str,
     access_token: str,
     refresh_token: str,
     endpoint: str,
@@ -188,14 +203,14 @@ def salesforce_source(
 ):
     config: RESTAPIConfig = {
         "client": {
-            "base_url": f"https://{subdomain}.my.salesforce.com",
+            "base_url": instance_url,
             "auth": SalseforceAuth(refresh_token, access_token),
-            "paginator": SalesforceEndpointPaginator(subdomain=subdomain),
+            "paginator": SalesforceEndpointPaginator(instance_url=instance_url),
         },
         "resource_defaults": {
-            "primary_key": "id",
+            **({"primary_key": "id"} if is_incremental else {}),
         },
-        "resources": [get_resource(endpoint, is_incremental, subdomain)],
+        "resources": [get_resource(endpoint, is_incremental)],
     }
 
     yield from rest_api_resources(config, team_id, job_id)

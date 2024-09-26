@@ -7,6 +7,7 @@ from django.dispatch.dispatcher import receiver
 import structlog
 
 from posthog.cdp.templates.hog_function_template import HogFunctionTemplate
+from posthog.helpers.encrypted_fields import EncryptedJSONStringField
 from posthog.models.action.action import Action
 from posthog.models.team.team import Team
 from posthog.models.utils import UUIDModel
@@ -17,7 +18,6 @@ from posthog.plugins.plugin_server_api import (
 )
 
 DEFAULT_STATE = {"state": 0, "tokens": 0, "rating": 0}
-
 
 logger = structlog.get_logger(__name__)
 
@@ -31,22 +31,25 @@ class HogFunctionState(enum.Enum):
 
 
 class HogFunction(UUIDModel):
-    team: models.ForeignKey = models.ForeignKey("Team", on_delete=models.CASCADE)
-    name: models.CharField = models.CharField(max_length=400, null=True, blank=True)
-    description: models.TextField = models.TextField(blank=True, default="")
-    created_at: models.DateTimeField = models.DateTimeField(auto_now_add=True, blank=True)
-    created_by: models.ForeignKey = models.ForeignKey("User", on_delete=models.SET_NULL, null=True, blank=True)
-    deleted: models.BooleanField = models.BooleanField(default=False)
-    updated_at: models.DateTimeField = models.DateTimeField(auto_now=True)
-    enabled: models.BooleanField = models.BooleanField(default=False)
+    team = models.ForeignKey("Team", on_delete=models.CASCADE)
+    name = models.CharField(max_length=400, null=True, blank=True)
+    description = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, blank=True)
+    created_by = models.ForeignKey("User", on_delete=models.SET_NULL, null=True, blank=True)
+    deleted = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+    enabled = models.BooleanField(default=False)
 
-    icon_url: models.TextField = models.TextField(null=True, blank=True)
-    hog: models.TextField = models.TextField()
-    bytecode: models.JSONField = models.JSONField(null=True, blank=True)
-    inputs_schema: models.JSONField = models.JSONField(null=True)
-    inputs: models.JSONField = models.JSONField(null=True)
-    filters: models.JSONField = models.JSONField(null=True, blank=True)
-    template_id: models.CharField = models.CharField(max_length=400, null=True, blank=True)
+    icon_url = models.TextField(null=True, blank=True)
+    hog = models.TextField()
+    bytecode = models.JSONField(null=True, blank=True)
+    inputs_schema = models.JSONField(null=True)
+    inputs = models.JSONField(null=True)
+    encrypted_inputs: EncryptedJSONStringField = EncryptedJSONStringField(null=True, blank=True)
+
+    filters = models.JSONField(null=True, blank=True)
+    masking = models.JSONField(null=True, blank=True)
+    template_id = models.CharField(max_length=400, null=True, blank=True)
 
     @property
     def template(self) -> Optional[HogFunctionTemplate]:
@@ -97,14 +100,37 @@ class HogFunction(UUIDModel):
 
         return self.status
 
+    def move_secret_inputs(self):
+        # Moves any secret inputs to the encrypted_inputs var
+        raw_inputs = self.inputs or {}
+        raw_encrypted_inputs = self.encrypted_inputs or {}
+
+        final_inputs = {}
+        final_encrypted_inputs = {}
+
+        for schema in self.inputs_schema or []:
+            value = raw_inputs.get(schema["key"])
+            encrypted_value = raw_encrypted_inputs.get(schema["key"])
+
+            if not schema.get("secret"):
+                final_inputs[schema["key"]] = value
+            else:
+                # We either store the incoming value if given or the encrypted value
+                final_encrypted_inputs[schema["key"]] = value or encrypted_value
+
+        self.inputs = final_inputs
+        self.encrypted_inputs = final_encrypted_inputs
+
     def save(self, *args, **kwargs):
         from posthog.cdp.filters import compile_filters_bytecode
 
+        self.move_secret_inputs()
         self.filters = compile_filters_bytecode(self.filters, self.team)
+
         return super().save(*args, **kwargs)
 
     def __str__(self):
-        return self.name
+        return f"HogFunction {self.id}: {self.name}"
 
 
 @receiver(post_save, sender=HogFunction)

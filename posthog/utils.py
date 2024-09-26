@@ -6,7 +6,6 @@ import datetime as dt
 import gzip
 import hashlib
 import json
-from operator import itemgetter
 import os
 import re
 import secrets
@@ -14,18 +13,14 @@ import string
 import time
 import uuid
 import zlib
+from collections.abc import Generator, Mapping
 from enum import Enum
 from functools import lru_cache, wraps
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Optional,
-    Union,
-    cast,
-)
-from collections.abc import Generator, Mapping
+from operator import itemgetter
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 from urllib.parse import unquote, urljoin, urlparse
 from zoneinfo import ZoneInfo
+from rest_framework import serializers
 
 import lzstring
 import posthoganalytics
@@ -49,7 +44,10 @@ from sentry_sdk.api import capture_exception
 
 from posthog.cloud_utils import get_cached_instance_license, is_cloud
 from posthog.constants import AvailableFeature
-from posthog.exceptions import UnspecifiedCompressionFallbackParsingError, RequestParsingError
+from posthog.exceptions import (
+    RequestParsingError,
+    UnspecifiedCompressionFallbackParsingError,
+)
 from posthog.git import get_git_branch, get_git_commit_short
 from posthog.metrics import KLUDGES_COUNTER
 from posthog.redis import get_client
@@ -60,6 +58,7 @@ if TYPE_CHECKING:
     from posthog.models import Team, User
 
 DATERANGE_MAP = {
+    "second": datetime.timedelta(seconds=1),
     "minute": datetime.timedelta(minutes=1),
     "hour": datetime.timedelta(hours=1),
     "day": datetime.timedelta(days=1),
@@ -70,7 +69,6 @@ ANONYMOUS_REGEX = r"^([a-z0-9]+\-){4}([a-z0-9]+)$"
 UUID_REGEX = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 DEFAULT_DATE_FROM_DAYS = 7
-
 
 logger = structlog.get_logger(__name__)
 
@@ -287,6 +285,8 @@ def render_template(
     *,
     team_for_public_context: Optional["Team"] = None,
 ) -> HttpResponse:
+    from posthog.geoip import get_geoip_properties
+
     """Render Django template.
 
     If team_for_public_context is provided, this means this is a public page such as a shared dashboard.
@@ -315,7 +315,7 @@ def render_template(
     if settings.E2E_TESTING:
         context["e2e_testing"] = True
         context["js_posthog_api_key"] = "'phc_ex7Mnvi4DqeB6xSQoXU1UVPzAmUIpiciRKQQXGGTYQO'"
-        context["js_posthog_host"] = "'https://internal-e.posthog.com'"
+        context["js_posthog_host"] = "'https://internal-t.posthog.com'"
         context["js_posthog_ui_host"] = "'https://us.posthog.com'"
 
     elif settings.SELF_CAPTURE:
@@ -326,7 +326,7 @@ def render_template(
             context["js_posthog_host"] = "window.location.origin"
     else:
         context["js_posthog_api_key"] = "'sTMFPsFhdP1Ssg'"
-        context["js_posthog_host"] = "'https://internal-e.posthog.com'"
+        context["js_posthog_host"] = "'https://internal-t.posthog.com'"
         context["js_posthog_ui_host"] = "'https://us.posthog.com'"
 
     context["js_capture_time_to_see_data"] = settings.CAPTURE_TIME_TO_SEE_DATA
@@ -344,6 +344,9 @@ def render_template(
         "year_in_hog_url": year_in_hog_url,
     }
 
+    geo_ip_country_code = get_geoip_properties(get_ip_address(request)).get("$geoip_country_code", None)
+    posthog_app_context["is_region_blocked"] = geo_ip_country_code in settings.BLOCKED_GEOIP_REGIONS
+
     posthog_bootstrap: dict[str, Any] = {}
     posthog_distinct_id: Optional[str] = None
 
@@ -351,12 +354,14 @@ def render_template(
     if not request.GET.get("no-preloaded-app-context"):
         from posthog.api.shared import TeamPublicSerializer
         from posthog.api.team import TeamSerializer
+        from posthog.api.project import ProjectSerializer
         from posthog.api.user import UserSerializer
         from posthog.user_permissions import UserPermissions
         from posthog.views import preflight_check
 
         posthog_app_context = {
             "current_user": None,
+            "current_project": None,
             "current_team": None,
             "preflight": json.loads(preflight_check(request).getvalue()),
             "default_event_name": "$pageview",
@@ -388,6 +393,12 @@ def render_template(
                     many=False,
                 )
                 posthog_app_context["current_team"] = team_serialized.data
+                project_serialized = ProjectSerializer(
+                    user.team.project,
+                    context={"request": request, "user_permissions": user_permissions},
+                    many=False,
+                )
+                posthog_app_context["current_project"] = project_serialized.data
                 posthog_app_context["frontend_apps"] = get_frontend_apps(user.team.pk)
                 posthog_app_context["default_event_name"] = get_default_event_name(user.team)
 
@@ -1043,6 +1054,18 @@ def refresh_requested_by_client(request: Request) -> bool | str:
 
 def cache_requested_by_client(request: Request) -> bool | str:
     return _request_has_key_set("use_cache", request)
+
+
+def filters_override_requested_by_client(request: Request) -> Optional[dict]:
+    raw_filters = request.query_params.get("filters_override")
+
+    if raw_filters is not None:
+        try:
+            return json.loads(raw_filters)
+        except Exception:
+            raise serializers.ValidationError({"filters_override": "Invalid JSON passed in filters_override parameter"})
+
+    return None
 
 
 def _request_has_key_set(key: str, request: Request, allowed_values: Optional[list[str]] = None) -> bool | str:

@@ -35,6 +35,7 @@ PropertyType = Literal[
     "precalculated-cohort",
     "group",
     "recording",
+    "log_entry",
     "behavioral",
     "session",
     "hogql",
@@ -66,6 +67,8 @@ OperatorType = Literal[
     "is_date_exact",
     "is_date_after",
     "is_date_before",
+    "in",
+    "not_in",
 ]
 
 OperatorInterval = Literal["day", "week", "month", "year"]
@@ -91,6 +94,7 @@ VALIDATE_PROP_TYPES = {
     "precalculated-cohort": ["key", "value"],
     "group": ["key", "value", "group_type_index"],
     "recording": ["key", "value"],
+    "log_entry": ["key", "value"],
     "behavioral": ["key", "value"],
     "session": ["key", "value"],
     "hogql": ["key"],

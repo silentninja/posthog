@@ -13,7 +13,6 @@ import { useCallback, useState } from 'react'
 import { EventDetails } from 'scenes/activity/explore/EventDetails'
 import { InsightEmptyState, InsightErrorState } from 'scenes/insights/EmptyStates'
 import { PersonDeleteModal } from 'scenes/persons/PersonDeleteModal'
-import { SessionPlayerModal } from 'scenes/session-recordings/player/modal/SessionPlayerModal'
 
 import { AutoLoad } from '~/queries/nodes/DataNode/AutoLoad'
 import { dataNodeLogic, DataNodeLogicProps } from '~/queries/nodes/DataNode/dataNodeLogic'
@@ -74,7 +73,7 @@ interface DataTableProps {
     query: DataTableNode
     setQuery?: (query: DataTableNode) => void
     /** Custom table columns */
-    context?: QueryContext
+    context?: QueryContext<DataTableNode>
     /* Cached Results are provided when shared or exported,
     the data node logic becomes read only implicitly */
     cachedResults?: AnyResponseType
@@ -95,7 +94,7 @@ let uniqueNode = 0
 export function DataTable({ uniqueKey, query, setQuery, context, cachedResults }: DataTableProps): JSX.Element {
     const [uniqueNodeKey] = useState(() => uniqueNode++)
     const [dataKey] = useState(() => `DataNode.${uniqueKey || uniqueNodeKey}`)
-    const insightProps: InsightLogicProps = context?.insightProps || {
+    const insightProps: InsightLogicProps<DataTableNode> = context?.insightProps || {
         dashboardItemId: `new-AdHoc.${dataKey}`,
         dataNodeCollectionId: dataKey,
     }
@@ -591,7 +590,6 @@ export function DataTable({ uniqueKey, query, setQuery, context, cachedResults }
                         />
                     )}
                     {/* TODO: this doesn't seem like the right solution... */}
-                    <SessionPlayerModal />
                     <PersonDeleteModal />
                 </div>
             </BindLogic>

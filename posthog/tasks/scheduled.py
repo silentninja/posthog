@@ -8,13 +8,14 @@ from django.conf import settings
 
 from posthog.caching.warming import schedule_warming_for_teams_task
 from posthog.celery import app
+from posthog.tasks.alerts.checks import check_all_alerts_task, checks_cleanup_task
 from posthog.tasks.integrations import refresh_integrations
 from posthog.tasks.tasks import (
     calculate_cohort,
     calculate_decide_usage,
+    calculate_external_data_rows_synced,
     calculate_replay_embeddings,
     check_async_migration_health,
-    check_data_import_row_limits,
     check_flags_to_rollback,
     clean_stale_partials,
     clear_clickhouse_deleted_person,
@@ -38,19 +39,16 @@ from posthog.tasks.tasks import (
     process_scheduled_changes,
     redis_celery_queue_depth,
     redis_heartbeat,
+    replay_count_metrics,
     schedule_all_subscriptions,
-    schedule_cache_updates_task,
     send_org_usage_reports,
     start_poll_query_performance,
     stop_surveys_reached_target,
     sync_all_organization_available_product_features,
-    sync_insight_cache_states_task,
     update_event_partitions,
     update_quota_limiting,
-    verify_persons_data_in_sync,
     update_survey_iteration,
-    replay_count_metrics,
-    calculate_external_data_rows_synced,
+    verify_persons_data_in_sync,
 )
 from posthog.utils import get_crontab
 
@@ -95,7 +93,7 @@ def setup_periodic_tasks(sender: Celery, **kwargs: Any) -> None:
     add_periodic_task_with_expiry(sender, 20, start_poll_query_performance.s(), "20 sec query performance heartbeat")
 
     sender.add_periodic_task(
-        crontab(hour="*", minute="*/30"),
+        crontab(hour="*", minute="0"),
         schedule_warming_for_teams_task.s(),
         name="schedule warming for largest teams",
     )
@@ -146,21 +144,6 @@ def setup_periodic_tasks(sender: Celery, **kwargs: Any) -> None:
 
     # Sync all Organization.available_product_features every hour, only for billing v1 orgs
     sender.add_periodic_task(crontab(minute="30", hour="*"), sync_all_organization_available_product_features.s())
-
-    sync_insight_cache_states_schedule = get_crontab(settings.SYNC_INSIGHT_CACHE_STATES_SCHEDULE)
-    if sync_insight_cache_states_schedule:
-        sender.add_periodic_task(
-            sync_insight_cache_states_schedule,
-            sync_insight_cache_states_task.s(),
-            name="sync insight cache states",
-        )
-
-    add_periodic_task_with_expiry(
-        sender,
-        settings.UPDATE_CACHED_DASHBOARD_ITEMS_INTERVAL_SECONDS,
-        schedule_cache_updates_task.s(),
-        "check dashboard items",
-    )
 
     sender.add_periodic_task(crontab(minute="*/15"), check_async_migration_health.s())
 
@@ -217,11 +200,20 @@ def setup_periodic_tasks(sender: Celery, **kwargs: Any) -> None:
         name="Graphile Worker queue size",
     )
 
-    add_periodic_task_with_expiry(
-        sender,
-        120,
+    sender.add_periodic_task(
+        get_crontab(settings.CALCULATE_COHORTS_DAY_SCHEDULE),
         calculate_cohort.s(),
-        name="recalculate cohorts",
+        name="recalculate cohorts day",
+        expires=120 * 1.5,
+        args=(settings.CALCULATE_X_PARALLEL_COHORTS_DURING_DAY,),
+    )
+
+    sender.add_periodic_task(
+        get_crontab(settings.CALCULATE_COHORTS_NIGHT_SCHEDULE),
+        calculate_cohort.s(),
+        name="recalculate cohorts night",
+        expires=60 * 1.5,
+        args=(settings.CALCULATE_X_PARALLEL_COHORTS_DURING_NIGHT,),
     )
 
     add_periodic_task_with_expiry(
@@ -257,6 +249,18 @@ def setup_periodic_tasks(sender: Celery, **kwargs: Any) -> None:
         crontab(hour="*/12"),
         update_survey_iteration.s(),
         name="update survey iteration based on date",
+    )
+
+    sender.add_periodic_task(
+        crontab(hour="*", minute="45"),
+        check_all_alerts_task.s(),
+        name="check alerts for matches and send notifications",
+    )
+
+    sender.add_periodic_task(
+        crontab(hour="8", minute="0"),
+        checks_cleanup_task.s(),
+        name="clean up old alert checks",
     )
 
     if settings.EE_AVAILABLE:
@@ -319,13 +323,7 @@ def setup_periodic_tasks(sender: Celery, **kwargs: Any) -> None:
             name="delete expired exported assets",
         )
 
-    sender.add_periodic_task(
-        crontab(minute="*/20"),
-        check_data_import_row_limits.s(),
-        name="check external data rows synced",
-    )
     # Every 20 minutes try to retrieve and calculate total rows synced in period
-
     sender.add_periodic_task(
         crontab(minute="*/20"),
         calculate_external_data_rows_synced.s(),

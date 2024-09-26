@@ -18,7 +18,7 @@ from django.shortcuts import get_object_or_404
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter
 from rest_framework import request, response, serializers, viewsets
-from rest_framework.decorators import action
+from posthog.api.utils import action
 from rest_framework.exceptions import MethodNotAllowed, NotFound, ValidationError
 from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
@@ -353,12 +353,15 @@ class PersonViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             OpenApiParameter(
                 "delete_events",
                 OpenApiTypes.BOOL,
-                description="If true, a task to delete all events associated with this person will be created and queued. The task does not run immediately and instead is batched together and at 5AM UTC every Sunday (controlled by environment variable CLEAR_CLICKHOUSE_REMOVED_DATA_SCHEDULE_CRON)",
+                description="If true, a task to delete all events associated with this person will be created and queued. The task does not run immediately and instead is batched together and at 5AM UTC every Sunday",
                 default=False,
             ),
         ],
     )
     def destroy(self, request: request.Request, pk=None, **kwargs):
+        """
+        Use this endpoint to delete individual persons. For bulk deletion, use the bulk_delete endpoint instead.
+        """
         try:
             person = self.get_object()
             person_id = person.id
@@ -391,7 +394,71 @@ class PersonViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         except Person.DoesNotExist:
             raise NotFound(detail="Person not found.")
 
-    @action(methods=["GET"], detail=False)
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                "delete_events",
+                OpenApiTypes.BOOL,
+                description="If true, a task to delete all events associated with this person will be created and queued. The task does not run immediately and instead is batched together and at 5AM UTC every Sunday",
+                default=False,
+            ),
+            OpenApiParameter(
+                "distinct_ids",
+                OpenApiTypes.OBJECT,
+                description="A list of distinct IDs, up to 100 of them. We'll delete all persons associated with those distinct IDs.",
+            ),
+            OpenApiParameter(
+                "ids",
+                OpenApiTypes.OBJECT,
+                description="A list of PostHog person IDs, up to 100 of them. We'll delete all the persons listed.",
+            ),
+        ],
+    )
+    @action(methods=["POST"], detail=False, required_scopes=["person:write"])
+    def bulk_delete(self, request: request.Request, pk=None, **kwargs):
+        """
+        This endpoint allows you to bulk delete persons, either by the PostHog person IDs or by distinct IDs. You can pass in a maximum of 100 IDs per call.
+        """
+        if distinct_ids := request.data.get("distinct_ids"):
+            if len(distinct_ids) > 100:
+                raise ValidationError("You can only pass 100 distinct_ids in one call")
+            persons = self.get_queryset().filter(persondistinctid__distinct_id__in=distinct_ids)
+        elif ids := request.data.get("ids"):
+            if len(ids) > 100:
+                raise ValidationError("You can only pass 100 ids in one call")
+            persons = self.get_queryset().filter(uuid__in=ids)
+        else:
+            raise ValidationError("You need to specify either distinct_ids or ids")
+
+        for person in persons:
+            delete_person(person=person)
+            self.perform_destroy(person)
+            log_activity(
+                organization_id=self.organization.id,
+                team_id=self.team_id,
+                user=cast(User, request.user),
+                was_impersonated=is_impersonated_session(request),
+                item_id=person.id,
+                scope="Person",
+                activity="deleted",
+                detail=Detail(name=str(person.uuid)),
+            )
+            # Once the person is deleted, queue deletion of associated data, if that was requested
+            if request.data.get("delete_events"):
+                AsyncDeletion.objects.bulk_create(
+                    [
+                        AsyncDeletion(
+                            deletion_type=DeletionType.Person,
+                            team_id=self.team_id,
+                            key=str(person.uuid),
+                            created_by=cast(User, self.request.user),
+                        )
+                    ],
+                    ignore_conflicts=True,
+                )
+        return response.Response(status=202)
+
+    @action(methods=["GET"], detail=False, required_scopes=["person:read"])
     def values(self, request: request.Request, **kwargs) -> response.Response:
         key = request.GET.get("key")
         value = request.GET.get("value")
@@ -434,7 +501,7 @@ class PersonViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
 
         return result
 
-    @action(methods=["POST"], detail=True)
+    @action(methods=["POST"], detail=True, required_scopes=["person:write"])
     def split(self, request: request.Request, pk=None, **kwargs) -> response.Response:
         person: Person = self.get_object()
         distinct_ids = person.distinct_ids
@@ -479,7 +546,7 @@ class PersonViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             ),
         ]
     )
-    @action(methods=["POST"], detail=True)
+    @action(methods=["POST"], detail=True, required_scopes=["person:write"])
     def update_property(self, request: request.Request, pk=None, **kwargs) -> response.Response:
         if request.data.get("value") is None:
             return Response(
@@ -514,7 +581,7 @@ class PersonViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             ),
         ]
     )
-    @action(methods=["POST"], detail=True)
+    @action(methods=["POST"], detail=True, required_scopes=["person:write"])
     def delete_property(self, request: request.Request, pk=None, **kwargs) -> response.Response:
         person: Person = get_pk_or_uuid(Person.objects.filter(team_id=self.team_id), pk).get()
 
@@ -567,7 +634,7 @@ class PersonViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
 
         return response.Response({"results": CohortSerializer(cohorts, many=True).data})
 
-    @action(methods=["GET"], url_path="activity", detail=False)
+    @action(methods=["GET"], url_path="activity", detail=False, required_scopes=["activity_log:read"])
     def all_activity(self, request: request.Request, **kwargs):
         limit = int(request.query_params.get("limit", "10"))
         page = int(request.query_params.get("page", "1"))
@@ -636,16 +703,17 @@ class PersonViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             },
         )
 
-        log_activity(
-            organization_id=self.organization.id,
-            team_id=self.team.id,
-            user=user,
-            was_impersonated=is_impersonated_session(self.request),
-            item_id=instance.pk,
-            scope="Person",
-            activity="updated",
-            detail=Detail(changes=[Change(type="Person", action="changed", field="properties")]),
-        )
+        if self.organization.id:  # should always be true, but mypy...
+            log_activity(
+                organization_id=self.organization.id,
+                team_id=self.team.id,
+                user=user,
+                was_impersonated=is_impersonated_session(self.request),
+                item_id=instance.pk,
+                scope="Person",
+                activity="updated",
+                detail=Detail(changes=[Change(type="Person", action="changed", field="properties")]),
+            )
 
     # PRAGMA: Methods for getting Persons via clickhouse queries
     def _respond_with_cached_results(
@@ -920,4 +988,4 @@ def prepare_actor_query_filter(filter: T) -> T:
 
 
 class LegacyPersonViewSet(PersonViewSet):
-    derive_current_team_from_user_only = True
+    param_derived_from_user_current_team = "team_id"

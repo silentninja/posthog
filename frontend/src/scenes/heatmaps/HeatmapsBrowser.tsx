@@ -5,8 +5,8 @@ import { AuthorizedUrlList } from 'lib/components/AuthorizedUrlList/AuthorizedUr
 import { appEditorUrl, AuthorizedUrlListType } from 'lib/components/AuthorizedUrlList/authorizedUrlListLogic'
 import { DateFilter } from 'lib/components/DateFilter/DateFilter'
 import { HeatmapsSettings } from 'lib/components/heatmaps/HeatMapsSettings'
-import { heatmapDateOptions } from 'lib/components/heatmaps/utils'
 import { DetectiveHog } from 'lib/components/hedgehogs'
+import { heatmapDateOptions } from 'lib/components/IframedToolbarBrowser/utils'
 import { useResizeObserver } from 'lib/hooks/useResizeObserver'
 import { IconChevronRight, IconOpenInNew } from 'lib/lemon-ui/icons'
 import React, { useEffect, useRef } from 'react'
@@ -242,14 +242,10 @@ function EmbeddedHeatmapBrowser({
                 <LoadingOverlay />
                 <iframe
                     ref={iframeRef}
-                    className="w-full h-full"
+                    className="w-full h-full bg-white"
                     src={appEditorUrl(browserUrl, {
                         userIntent: 'heatmaps',
                     })}
-                    // eslint-disable-next-line react/forbid-dom-props
-                    style={{
-                        background: '#FFF',
-                    }}
                     onLoad={onIframeLoad}
                     // these two sandbox values are necessary so that the site and toolbar can run
                     // this is a very loose sandbox,

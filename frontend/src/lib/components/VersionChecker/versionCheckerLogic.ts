@@ -1,4 +1,4 @@
-import { actions, afterMount, kea, listeners, path, reducers, sharedListeners } from 'kea'
+import { actions, afterMount, kea, key, listeners, path, props, reducers, sharedListeners } from 'kea'
 import { loaders } from 'kea-loaders'
 import api from 'lib/api'
 import { isNotNil } from 'lib/utils'
@@ -45,8 +45,14 @@ export interface AvailableVersions {
     deprecation?: PosthogJSDeprecation
 }
 
+export interface VersionCheckerLogicProps {
+    teamId: number | null
+}
+
 export const versionCheckerLogic = kea<versionCheckerLogicType>([
-    path(['components', 'VersionChecker', 'versionCheckerLogic']),
+    props({ teamId: null } as VersionCheckerLogicProps),
+    key(({ teamId }) => teamId || 'no-team-id'),
+    path((key) => ['components', 'VersionChecker', 'versionCheckerLogic', key]),
     actions({
         setVersionWarning: (versionWarning: SDKVersionWarning | null) => ({ versionWarning }),
         setSdkVersions: (sdkVersions: SDKVersion[]) => ({ sdkVersions }),
@@ -184,19 +190,20 @@ export const versionCheckerLogic = kea<versionCheckerLogicType>([
                     let level: 'warning' | 'info' | 'error' | undefined
                     if (diff.kind === 'major' || numVersionsBehind >= 20) {
                         level = 'error'
-                    } else if ((diff.kind === 'minor' && diff.diff >= 5) || numVersionsBehind >= 10) {
+                    } else if (diff.kind === 'minor' && diff.diff >= 15) {
                         level = 'warning'
-                    } else if (diff.kind === 'minor' || numVersionsBehind >= 5) {
+                    } else if ((diff.kind === 'minor' && diff.diff >= 10) || numVersionsBehind >= 10) {
                         level = 'info'
                     } else if (latestUsedVersion.extra) {
-                        // if we have an extra (alpha/beta/rc/etc) version, we should always show a warning if they aren't on the latest
+                        // if we have an extra (alpha/beta/rc/etc.) version, we should always show a warning if they aren't on the latest
                         level = 'warning'
                     } else {
                         // don't warn for a small number of patch versions behind
                         level = undefined
                     }
 
-                    if (level) {
+                    // we check if there is a "latest user version string" to avoid returning odd data in unexpected cases
+                    if (level && !!versionToString(latestUsedVersion).trim().length) {
                         warning = {
                             latestUsedVersion: versionToString(latestUsedVersion),
                             latestAvailableVersion: versionToString(latestAvailableVersion),

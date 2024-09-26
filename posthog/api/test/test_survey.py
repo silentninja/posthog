@@ -6,16 +6,14 @@ from unittest.mock import ANY
 import pytest
 from django.core.cache import cache
 from django.test.client import Client
-
 from freezegun.api import freeze_time
-from posthog.api.survey import nh3_clean_with_allow_list
-from posthog.models.cohort.cohort import Cohort
 from nanoid import generate
 from rest_framework import status
 
+from posthog.api.survey import nh3_clean_with_allow_list
 from posthog.constants import AvailableFeature
-from posthog.models import FeatureFlag, Action
-
+from posthog.models import Action, FeatureFlag
+from posthog.models.cohort.cohort import Cohort
 from posthog.models.feedback.survey import Survey
 from posthog.test.base import (
     APIBaseTest,
@@ -2555,10 +2553,12 @@ class TestSurveysAPIList(BaseTest, QueryMatchingTest):
                                         "created_by": None,
                                         "deleted": False,
                                         "is_calculating": False,
+                                        "creation_context": None,
                                         "last_calculated_at": ANY,
                                         "team_id": self.team.id,
                                         "is_action": True,
                                         "bytecode_error": None,
+                                        "pinned_at": None,
                                         "tags": [],
                                     }
                                 ]
@@ -2685,7 +2685,7 @@ class TestResponsesCount(ClickhouseTestMixin, APIBaseTest):
         }
 
         earliest_survey = Survey.objects.create(team_id=self.team.id)
-        earliest_survey.created_at = datetime.now() - timedelta(days=101)
+        earliest_survey.start_date = datetime.now() - timedelta(days=101)
         earliest_survey.save()
 
         for survey_id, count in survey_counts.items():
@@ -2706,7 +2706,7 @@ class TestResponsesCount(ClickhouseTestMixin, APIBaseTest):
 
     @snapshot_clickhouse_queries
     @freeze_time("2024-05-01 14:40:09")
-    def test_responses_count_only_after_first_survey_created(self):
+    def test_responses_count_only_after_first_survey_started(self):
         survey_counts = {
             "d63bb580-01af-4819-aae5-edcf7ef2044f": 3,
             "fe7c4b62-8fc9-401e-b483-e4ff98fd13d5": 6,
@@ -2719,7 +2719,7 @@ class TestResponsesCount(ClickhouseTestMixin, APIBaseTest):
         }
 
         earliest_survey = Survey.objects.create(team_id=self.team.id)
-        earliest_survey.created_at = datetime.now() - timedelta(days=6)
+        earliest_survey.start_date = datetime.now() - timedelta(days=6)
         earliest_survey.save()
 
         for survey_id, count in survey_counts.items():

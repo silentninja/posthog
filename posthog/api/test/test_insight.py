@@ -311,6 +311,7 @@ class TestInsight(ClickhouseTestMixin, APIBaseTest, QueryMatchingTest):
                 dashboard=mock.ANY,
                 execution_mode=ExecutionMode.EXTENDED_CACHE_CALCULATE_ASYNC_IF_STALE,
                 user=mock.ANY,
+                filters_override=None,
             )
 
         with patch(
@@ -322,6 +323,7 @@ class TestInsight(ClickhouseTestMixin, APIBaseTest, QueryMatchingTest):
                 dashboard=mock.ANY,
                 execution_mode=ExecutionMode.RECENT_CACHE_CALCULATE_BLOCKING_IF_STALE,
                 user=mock.ANY,
+                filters_override=None,
             )
 
     def test_get_insight_by_short_id(self) -> None:
@@ -2850,7 +2852,7 @@ class TestInsight(ClickhouseTestMixin, APIBaseTest, QueryMatchingTest):
             )
             self.assertEqual(
                 response_placeholder.json(),
-                self.validation_error_response("Placeholders, such as {team_id}, are not supported in this context"),
+                self.validation_error_response("Unresolved placeholder: {team_id}"),
             )
 
     @also_test_with_materialized_columns(event_properties=["int_value"], person_properties=["fish"])
@@ -3087,7 +3089,7 @@ class TestInsight(ClickhouseTestMixin, APIBaseTest, QueryMatchingTest):
                     "funnel_window_days": 14,
                 },
             )
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
             response_json = response.json()
             self.assertEqual(len(response_json["result"]), 1)
             self.assertEqual(len(response_json["result"][0]), 2)
@@ -3142,7 +3144,7 @@ class TestInsight(ClickhouseTestMixin, APIBaseTest, QueryMatchingTest):
                     "funnel_window_days": 14,
                 },
             )
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
             response_json = response.json()
             self.assertEqual(len(response_json["result"]), 1)
             self.assertEqual(len(response_json["result"][0]), 2)

@@ -17,7 +17,6 @@ import {
     RedisPool,
     TimestampFormat,
 } from '../types'
-import { Hub } from './../types'
 import { status } from './status'
 
 /** Time until autoexit (due to error) gives up on graceful exit and kills the process right away. */
@@ -577,31 +576,6 @@ export class RaceConditionError extends Error {
     name = 'RaceConditionError'
 }
 
-export interface StalenessCheckResult {
-    isServerStale: boolean
-    timeSinceLastActivity: number | null
-    lastActivity?: string | null
-    lastActivityType?: string
-    instanceId?: string
-}
-
-export function stalenessCheck(hub: Hub | undefined, stalenessSeconds: number): StalenessCheckResult {
-    let isServerStale = false
-
-    const timeSinceLastActivity = hub?.lastActivity ? new Date().valueOf() - hub.lastActivity : null
-    if (timeSinceLastActivity && timeSinceLastActivity > stalenessSeconds * 1000) {
-        isServerStale = true
-    }
-
-    return {
-        isServerStale,
-        timeSinceLastActivity,
-        instanceId: hub?.instanceId.toString(),
-        lastActivity: hub?.lastActivity ? new Date(hub.lastActivity).toISOString() : null,
-        lastActivityType: hub?.lastActivityType,
-    }
-}
-
 /** Get a value from a properties object by its path. This allows accessing nested properties. */
 export function getPropertyValueByPath(properties: Properties, [firstKey, ...nestedKeys]: string[]): any {
     if (firstKey === undefined) {
@@ -619,4 +593,98 @@ export function getPropertyValueByPath(properties: Properties, [firstKey, ...nes
 
 export async function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Values of the $lib property that have been seen in the wild
+export const KNOWN_LIB_VALUES = new Set([
+    'web',
+    'posthog-python',
+    '',
+    'js',
+    'posthog-node',
+    'posthog-react-native',
+    'posthog-ruby',
+    'posthog-ios',
+    'posthog-android',
+    'Segment',
+    'posthog-go',
+    'analytics-node',
+    'RudderLabs JavaScript SDK',
+    'mobile',
+    'posthog-php',
+    'zapier',
+    'Webflow',
+    'posthog-flutter',
+    'com.rudderstack.android.sdk.core',
+    'rudder-analytics-python',
+    'rudder-ios-library',
+    'rudder-analytics-php',
+    'macos',
+    'service_data',
+    'flow',
+    'PROD',
+    'unknown',
+    'api',
+    'unbounce',
+    'backend',
+    'analytics-python',
+    'windows',
+    'cf-analytics-go',
+    'server',
+    'core',
+    'Marketing',
+    'Product',
+    'com.rudderstack.android.sdk',
+    'net-gibraltar',
+    'posthog-java',
+    'rudderanalytics-ruby',
+    'GSHEETS_AIRBYTE',
+    'posthog-plugin-server',
+    'DotPostHog',
+    'analytics-go',
+    'serverless',
+    'wordpress',
+    'hog_function',
+    'http',
+    'desktop',
+    'elixir',
+    'DEV',
+    'RudderAnalytics.NET',
+    'PR',
+    'railway',
+    'HTTP',
+    'extension',
+    'cyclotron-testing',
+    'RudderStack Shopify Cloud',
+    'GSHEETS_MONITOR',
+    'Rudder',
+    'API',
+    'rudder-sdk-ruby-sync',
+    'curl',
+])
+
+export const getKnownLibValueOrSentinel = (lib: string): string => {
+    if (lib === '') {
+        return '$empty'
+    }
+    if (!lib) {
+        return '$nil'
+    }
+    if (KNOWN_LIB_VALUES.has(lib)) {
+        return lib
+    }
+    return '$other'
+}
+
+// Check if 2 maps with primitive values are equal
+export const areMapsEqual = <K, V>(map1: Map<K, V>, map2: Map<K, V>): boolean => {
+    if (map1.size !== map2.size) {
+        return false
+    }
+    for (const [key, value] of map1) {
+        if (!map2.has(key) || map2.get(key) !== value) {
+            return false
+        }
+    }
+    return true
 }

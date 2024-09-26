@@ -428,10 +428,10 @@ class TestExternalDataSource(APIBaseTest):
 
         response = self.client.delete(f"/api/projects/{self.team.pk}/external_data_sources/{source.pk}")
 
-        self.assertEqual(response.status_code, 204)
+        assert response.status_code == 204
 
-        self.assertFalse(ExternalDataSource.objects.filter(pk=source.pk).exists())
-        self.assertFalse(ExternalDataSchema.objects.filter(pk=schema.pk).exists())
+        assert ExternalDataSource.objects.filter(pk=source.pk, deleted=True).exists()
+        assert ExternalDataSchema.objects.filter(pk=schema.pk, deleted=True).exists()
 
     # TODO: update this test
     @patch("posthog.warehouse.api.external_data_source.trigger_external_data_source_workflow")
@@ -621,7 +621,7 @@ class TestExternalDataSource(APIBaseTest):
                 }
             ]
 
-            new_team = Team.objects.create(name="new_team", organization=self.team.organization)
+            new_team = Team.objects.create(id=984961485, name="new_team", organization=self.team.organization)
 
             response = self.client.post(
                 f"/api/projects/{new_team.pk}/external_data_sources/database_schema/",
@@ -665,7 +665,7 @@ class TestExternalDataSource(APIBaseTest):
                 }
             ]
 
-            new_team = Team.objects.create(name="new_team", organization=self.team.organization)
+            new_team = Team.objects.create(id=984961486, name="new_team", organization=self.team.organization)
 
             response = self.client.post(
                 f"/api/projects/{new_team.pk}/external_data_sources/database_schema/",

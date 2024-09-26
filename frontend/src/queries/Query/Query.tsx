@@ -1,5 +1,4 @@
 import { LemonDivider } from 'lib/lemon-ui/LemonDivider'
-import { SpinnerOverlay } from 'lib/lemon-ui/Spinner'
 import { useEffect, useState } from 'react'
 import { HogDebug } from 'scenes/debug/HogDebug'
 
@@ -9,7 +8,14 @@ import { DataTable } from '~/queries/nodes/DataTable/DataTable'
 import { InsightViz, insightVizDataNodeKey } from '~/queries/nodes/InsightViz/InsightViz'
 import { WebOverview } from '~/queries/nodes/WebOverview/WebOverview'
 import { QueryEditor } from '~/queries/QueryEditor/QueryEditor'
-import { AnyResponseType, DataTableNode, DataVisualizationNode, InsightVizNode, Node } from '~/queries/schema'
+import {
+    AnyResponseType,
+    DashboardFilter,
+    DataTableNode,
+    DataVisualizationNode,
+    InsightVizNode,
+    Node,
+} from '~/queries/schema'
 import { QueryContext } from '~/queries/types'
 
 import { DataTableVisualization } from '../nodes/DataVisualization/DataVisualization'
@@ -32,20 +38,22 @@ export interface QueryProps<Q extends Node> {
     setQuery?: (query: Q, isSourceUpdate?: boolean) => void
 
     /** Custom components passed down to a few query nodes (e.g. custom table columns) */
-    context?: QueryContext
+    context?: QueryContext<any>
     /* Cached Results are provided when shared or exported,
     the data node logic becomes read only implicitly */
     cachedResults?: AnyResponseType
     /** Disable any changes to the query */
     readOnly?: boolean
-    /** Show a stale overlay */
-    stale?: boolean
     /** Reduce UI elements to only show data */
     embedded?: boolean
+    /** Disables modals and other things */
+    inSharedMode?: boolean
+    /** Dashboard filters to override the ones in the query */
+    filtersOverride?: DashboardFilter | null
 }
 
 export function Query<Q extends Node>(props: QueryProps<Q>): JSX.Element | null {
-    const { query: propsQuery, setQuery: propsSetQuery, readOnly, stale, embedded } = props
+    const { query: propsQuery, setQuery: propsSetQuery, readOnly, embedded, filtersOverride, inSharedMode } = props
 
     const [localQuery, localSetQuery] = useState(propsQuery)
     useEffect(() => {
@@ -107,6 +115,8 @@ export function Query<Q extends Node>(props: QueryProps<Q>): JSX.Element | null 
                 readOnly={readOnly}
                 uniqueKey={uniqueKey}
                 embedded={embedded}
+                inSharedMode={inSharedMode}
+                filtersOverride={filtersOverride}
             />
         )
     } else if (isWebOverviewQuery(query)) {
@@ -139,7 +149,6 @@ export function Query<Q extends Node>(props: QueryProps<Q>): JSX.Element | null 
                             </div>
                         </>
                     ) : null}
-                    {stale && <SpinnerOverlay mode="editing" />}
                     {component}
                 </>
             </ErrorBoundary>

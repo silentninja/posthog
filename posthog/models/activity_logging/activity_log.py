@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, Optional, Union
+from uuid import UUID
 
 import structlog
 from django.core.paginator import Paginator
@@ -40,6 +41,7 @@ ActivityScope = Literal[
     "SessionRecordingPlaylist",
     "Comment",
     "Team",
+    "Project",
 ]
 ChangeAction = Literal["changed", "created", "deleted", "merged", "split", "exported"]
 
@@ -129,7 +131,7 @@ class ActivityLog(UUIDModel):
     # e.g. FeatureFlags - this will often be the name of a model class
     scope = models.fields.CharField(max_length=79, null=False)
     detail = models.JSONField(encoder=ActivityDetailEncoder, null=True)
-    created_at: models.DateTimeField = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(default=timezone.now)
 
 
 common_field_exclusions = [
@@ -219,6 +221,7 @@ field_exclusions: dict[ActivityScope, list[str]] = {
         "property_type_format",
     ],
     "Team": ["uuid", "updated_at", "api_token", "created_at", "id"],
+    "Project": ["id", "created_at"],
 }
 
 
@@ -368,10 +371,10 @@ def dict_changes_between(
 
 def log_activity(
     *,
-    organization_id: Optional[UUIDT],
+    organization_id: Optional[UUID],
     team_id: int,
     user: Optional[User],
-    item_id: Optional[Union[int, str, UUIDT]],
+    item_id: Optional[Union[int, str, UUID]],
     scope: str,
     activity: str,
     detail: Detail,

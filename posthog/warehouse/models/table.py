@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional, TypeAlias
 from django.db import models
 
@@ -80,31 +81,35 @@ class DataWarehouseTable(CreatedMetaFields, UpdatedMetaFields, UUIDModel, Delete
         Delta = "Delta", "Delta"
         DeltaS3Wrapper = "DeltaS3Wrapper", "DeltaS3Wrapper"
 
-    name: models.CharField = models.CharField(max_length=128)
-    format: models.CharField = models.CharField(max_length=128, choices=TableFormat.choices)
-    team: models.ForeignKey = models.ForeignKey(Team, on_delete=models.CASCADE)
+    name = models.CharField(max_length=128)
+    format = models.CharField(max_length=128, choices=TableFormat.choices)
+    team = models.ForeignKey(Team, on_delete=models.CASCADE)
 
-    url_pattern: models.CharField = models.CharField(max_length=500)
-    credential: models.ForeignKey = models.ForeignKey(
-        DataWarehouseCredential, on_delete=models.CASCADE, null=True, blank=True
-    )
+    url_pattern = models.CharField(max_length=500)
+    credential = models.ForeignKey(DataWarehouseCredential, on_delete=models.CASCADE, null=True, blank=True)
 
-    external_data_source: models.ForeignKey = models.ForeignKey(
-        "ExternalDataSource", on_delete=models.CASCADE, null=True, blank=True
-    )
+    external_data_source = models.ForeignKey("ExternalDataSource", on_delete=models.CASCADE, null=True, blank=True)
 
-    columns: models.JSONField = models.JSONField(
+    columns = models.JSONField(
         default=dict,
         null=True,
         blank=True,
         help_text="Dict of all columns with Clickhouse type (including Nullable())",
     )
 
-    row_count: models.IntegerField = models.IntegerField(
-        null=True, help_text="How many rows are currently synced in this table"
-    )
+    row_count = models.IntegerField(null=True, help_text="How many rows are currently synced in this table")
 
     __repr__ = sane_repr("name")
+
+    def soft_delete(self):
+        from posthog.warehouse.models.join import DataWarehouseJoin
+
+        DataWarehouseJoin.objects.filter(source_table_name=self.name).delete()
+        DataWarehouseJoin.objects.filter(joining_table_name=self.name).delete()
+
+        self.deleted = True
+        self.deleted_at = datetime.now()
+        self.save()
 
     def table_name_without_prefix(self) -> str:
         if self.external_data_source is not None and self.external_data_source.prefix is not None:
@@ -232,9 +237,15 @@ class DataWarehouseTable(CreatedMetaFields, UpdatedMetaFields, UUIDModel, Delete
 
         # Replace fields with any redefined fields if they exist
         external_table_fields = external_tables.get(self.table_name_without_prefix())
+        default_fields = external_tables.get("*", {})
         if external_table_fields is not None:
-            default_fields = external_tables.get("*", {})
             fields = {**external_table_fields, **default_fields}
+        else:
+            # Hide the `_dlt` fields from tables
+            if fields.get("_dlt_id") and fields.get("_dlt_load_id"):
+                del fields["_dlt_id"]
+                del fields["_dlt_load_id"]
+                fields = {**fields, **default_fields}
 
         return S3Table(
             name=self.name,

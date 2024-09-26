@@ -13,11 +13,12 @@ import {
 } from '@posthog/plugin-scaffold'
 import { Pool as GenericPool } from 'generic-pool'
 import { Redis } from 'ioredis'
+import { BatchConsumer } from 'kafka/batch-consumer'
 import { Kafka } from 'kafkajs'
 import { DateTime } from 'luxon'
-import { Job } from 'node-schedule'
 import { VM } from 'vm2'
 
+import { EncryptedFields } from './cdp/encryption-utils'
 import { ObjectStorage } from './main/services/object_storage'
 import { DB } from './utils/db/db'
 import { KafkaProducerWrapper } from './utils/db/kafka-producer-wrapper'
@@ -28,7 +29,6 @@ import { ActionMatcher } from './worker/ingestion/action-matcher'
 import { AppMetrics } from './worker/ingestion/app-metrics'
 import { GroupTypeManager } from './worker/ingestion/group-type-manager'
 import { OrganizationManager } from './worker/ingestion/organization-manager'
-import { EventsProcessor } from './worker/ingestion/process-event'
 import { TeamManager } from './worker/ingestion/team-manager'
 import { RustyHook } from './worker/rusty-hook'
 import { PluginsApiKeyManager } from './worker/vm/extensions/helpers/api-key-manager'
@@ -84,7 +84,7 @@ export enum PluginServerMode {
     recordings_blob_ingestion_overflow = 'recordings-blob-ingestion-overflow',
     cdp_processed_events = 'cdp-processed-events',
     cdp_function_callbacks = 'cdp-function-callbacks',
-    cdp_function_overflow = 'cdp-function-overflow',
+    cdp_cyclotron_worker = 'cdp-cyclotron-worker',
     functional_tests = 'functional-tests',
 }
 
@@ -94,6 +94,13 @@ export const stringToPluginServerMode = Object.fromEntries(
         PluginServerMode[key as keyof typeof PluginServerMode],
     ])
 ) as Record<string, PluginServerMode>
+
+export type PluginServerService = {
+    id: string
+    onShutdown: () => Promise<any>
+    healthcheck: () => boolean | Promise<boolean>
+    batchConsumer?: BatchConsumer
+}
 
 export type CdpConfig = {
     CDP_WATCHER_COST_ERROR: number // The max cost of an erroring function
@@ -107,6 +114,14 @@ export type CdpConfig = {
     CDP_WATCHER_DISABLED_TEMPORARY_TTL: number // How long a function should be temporarily disabled for
     CDP_WATCHER_DISABLED_TEMPORARY_MAX_COUNT: number // How many times a function can be disabled before it is disabled permanently
     CDP_ASYNC_FUNCTIONS_RUSTY_HOOK_TEAMS: string
+    CDP_HOG_FILTERS_TELEMETRY_TEAMS: string
+    CDP_CYCLOTRON_ENABLED_TEAMS: string
+    CDP_CYCLOTRON_BATCH_SIZE: number
+    CDP_CYCLOTRON_BATCH_DELAY_MS: number
+    CDP_REDIS_HOST: string
+    CDP_REDIS_PORT: number
+    CDP_REDIS_PASSWORD: string
+    CDP_EVENT_PROCESSOR_EXECUTE_FIRST_STEP: boolean
 }
 
 export interface PluginsServerConfig extends CdpConfig {
@@ -197,10 +212,6 @@ export interface PluginsServerConfig extends CdpConfig {
     HEALTHCHECK_MAX_STALE_SECONDS: number // maximum number of seconds the plugin server can go without ingesting events before the healthcheck fails
     SITE_URL: string | null
     KAFKA_PARTITIONS_CONSUMED_CONCURRENTLY: number // (advanced) how many kafka partitions the plugin server should consume from concurrently
-    CONVERSION_BUFFER_ENABLED: boolean
-    CONVERSION_BUFFER_ENABLED_TEAMS: string
-    CONVERSION_BUFFER_TOPIC_ENABLED_TEAMS: string
-    BUFFER_CONVERSION_SECONDS: number
     PERSON_INFO_CACHE_TTL: number
     KAFKA_HEALTHCHECK_SECONDS: number
     OBJECT_STORAGE_ENABLED: boolean // Disables or enables the use of object storage. It will become mandatory to use object storage
@@ -276,6 +287,11 @@ export interface PluginsServerConfig extends CdpConfig {
 
     // kafka debug stats interval
     SESSION_RECORDING_KAFKA_CONSUMPTION_STATISTICS_EVENT_INTERVAL_MS: number
+
+    ENCRYPTION_SALT_KEYS: string
+
+    CYCLOTRON_DATABASE_URL: string
+    CYCLOTRON_SHARD_DEPTH_LIMIT: number
 }
 
 export interface Hub extends PluginsServerConfig {
@@ -289,9 +305,7 @@ export interface Hub extends PluginsServerConfig {
     clickhouse: ClickHouse
     kafka: Kafka
     kafkaProducer: KafkaProducerWrapper
-    objectStorage: ObjectStorage
-    // metrics
-    pluginMetricsJob: Job | undefined
+    objectStorage?: ObjectStorage
     // currently enabled plugin status
     plugins: Map<PluginId, Plugin>
     pluginConfigs: Map<PluginConfigId, PluginConfig>
@@ -305,7 +319,6 @@ export interface Hub extends PluginsServerConfig {
     organizationManager: OrganizationManager
     pluginsApiKeyManager: PluginsApiKeyManager
     rootAccessManager: RootAccessManager
-    eventsProcessor: EventsProcessor
     actionManager: ActionManager
     actionMatcher: ActionMatcher
     appMetrics: AppMetrics
@@ -313,17 +326,13 @@ export interface Hub extends PluginsServerConfig {
     groupTypeManager: GroupTypeManager
     // geoip database, setup in workers
     mmdb?: ReaderModel
-    // diagnostics
-    lastActivity: number
-    lastActivityType: string
-    statelessVms: StatelessInstanceMap
-    conversionBufferEnabledTeams: Set<number>
     // functions
     enqueuePluginJob: (job: EnqueuedPluginJob) => Promise<void>
     // ValueMatchers used for various opt-in/out features
     pluginConfigsToSkipElementsParsing: ValueMatcher<number>
     // lookups
     eventsToDropByToken: Map<string, string[]>
+    encryptedFields: EncryptedFields
 }
 
 export interface PluginServerCapabilities {
@@ -341,7 +350,7 @@ export interface PluginServerCapabilities {
     sessionRecordingBlobOverflowIngestion?: boolean
     cdpProcessedEvents?: boolean
     cdpFunctionCallbacks?: boolean
-    cdpFunctionOverflow?: boolean
+    cdpCyclotronWorker?: boolean
     appManagementSingleton?: boolean
     preflightSchedules?: boolean // Used for instance health checks on hobby deploy, not useful on cloud
     http?: boolean
@@ -453,7 +462,6 @@ export interface PluginConfig {
     // we'll need to know which method this plugin is using to call it the right way
     // undefined for old plugins with multiple or deprecated methods
     method?: PluginMethod
-    filters?: PluginConfigFilters
 }
 
 export interface PluginJsonConfig {
@@ -992,30 +1000,6 @@ export interface ActionStep {
     properties: PropertyFilter[] | null
 }
 
-// subset of EntityFilter
-export interface PluginConfigFilterBase {
-    id: string
-    name: string | null
-    order: number
-    properties: (EventPropertyFilter | PersonPropertyFilter | ElementPropertyFilter)[]
-}
-
-export interface PluginConfigFilterEvents extends PluginConfigFilterBase {
-    type: 'events'
-}
-
-export interface PluginConfigFilterActions extends PluginConfigFilterBase {
-    type: 'actions'
-}
-
-export type PluginConfigFilter = PluginConfigFilterEvents | PluginConfigFilterActions
-
-export interface PluginConfigFilters {
-    events?: PluginConfigFilterEvents[]
-    actions?: PluginConfigFilterActions[]
-    filter_test_accounts?: boolean
-}
-
 /** Raw Action row from database. */
 export interface RawAction {
     id: number
@@ -1033,6 +1017,7 @@ export interface RawAction {
     steps_json: ActionStep[] | null
     bytecode: any[] | null
     bytecode_error: string | null
+    pinned_at: string | null
 }
 
 /** Usable Action model. */
@@ -1235,6 +1220,13 @@ export type AppMetric2Type = {
     app_source_id: string
     instance_id?: string
     metric_kind: 'failure' | 'success' | 'other'
-    metric_name: 'succeeded' | 'failed' | 'filtered' | 'disabled_temporarily' | 'disabled_permanently'
+    metric_name:
+        | 'succeeded'
+        | 'failed'
+        | 'filtered'
+        | 'disabled_temporarily'
+        | 'disabled_permanently'
+        | 'masked'
+        | 'filtering_failed'
     count: number
 }

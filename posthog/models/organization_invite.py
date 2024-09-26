@@ -35,30 +35,35 @@ def validate_private_project_access(value):
             raise exceptions.ValidationError('The "level" field must be either "member" or "admin".')
 
 
+class InviteExpiredException(exceptions.ValidationError):
+    def __init__(self, message="This invite has expired. Please ask your admin for a new one."):
+        super().__init__(message, code="expired")
+
+
 class OrganizationInvite(UUIDModel):
-    organization: models.ForeignKey = models.ForeignKey(
+    organization = models.ForeignKey(
         "posthog.Organization",
         on_delete=models.CASCADE,
         related_name="invites",
         related_query_name="invite",
     )
-    target_email: models.EmailField = models.EmailField(null=True, db_index=True)
-    first_name: models.CharField = models.CharField(max_length=30, blank=True, default="")
-    created_by: models.ForeignKey = models.ForeignKey(
+    target_email = models.EmailField(null=True, db_index=True)
+    first_name = models.CharField(max_length=30, blank=True, default="")
+    created_by = models.ForeignKey(
         "posthog.User",
         on_delete=models.SET_NULL,
         related_name="organization_invites",
         related_query_name="organization_invite",
         null=True,
     )
-    emailing_attempt_made: models.BooleanField = models.BooleanField(default=False)
-    created_at: models.DateTimeField = models.DateTimeField(auto_now_add=True)
-    updated_at: models.DateTimeField = models.DateTimeField(auto_now=True)
-    message: models.TextField = models.TextField(blank=True, null=True)
-    level: models.PositiveSmallIntegerField = models.PositiveSmallIntegerField(
+    emailing_attempt_made = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    message = models.TextField(blank=True, null=True)
+    level = models.PositiveSmallIntegerField(
         default=OrganizationMembership.Level.MEMBER, choices=OrganizationMembership.Level.choices
     )
-    private_project_access: models.JSONField = models.JSONField(
+    private_project_access = models.JSONField(
         default=list,
         null=True,
         blank=True,
@@ -85,10 +90,7 @@ class OrganizationInvite(UUIDModel):
             )
 
         if self.is_expired():
-            raise exceptions.ValidationError(
-                "This invite has expired. Please ask your admin for a new one.",
-                code="expired",
-            )
+            raise InviteExpiredException()
 
         if user is None and User.objects.filter(email=invite_email).exists():
             raise exceptions.ValidationError(f"/login?next={request_path}", code="account_exists")

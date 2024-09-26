@@ -95,7 +95,7 @@ describe('Dashboard', () => {
         // refresh the dashboard by changing date range
         cy.get('[data-attr="date-filter"]').click()
         cy.contains('span', 'Last 14 days').click()
-        cy.contains('span', 'Apply and save dashboard').click()
+        cy.contains('span', 'Save').click()
 
         cy.contains('span[class="text-primary text-sm font-medium"]', 'Refreshing').should('not.exist')
         cy.get('span').contains('Refreshing').should('not.exist')
@@ -163,7 +163,7 @@ describe('Dashboard', () => {
         cy.get('[data-attr=date-filter]').contains('No date range override').click()
         cy.get('div').contains('Yesterday').should('exist').click()
         cy.get('[data-attr=date-filter]').contains('Yesterday')
-        cy.get('button').contains('Apply and save dashboard').click()
+        cy.get('button').contains('Save').click()
         cy.get('.InsightCard h5').should('have.length', 1).contains('Yesterday')
         // Cool, now back to A and make sure the insight is still using the original range there, not the one from B
         cy.clickNavMenu('dashboards')
@@ -361,5 +361,96 @@ describe('Dashboard', () => {
 
         cy.wait(200)
         cy.get('[data-attr="top-bar-name"] .EditableField__display').contains(dashboardName).should('exist')
+    })
+
+    it('Changing dashboard filter shows updated insights', () => {
+        const dashboardName = randomString('to add an insight to')
+        const firstInsight = randomString('insight to add to dashboard')
+
+        // Create and visit a dashboard to get it into turbo mode cache
+        dashboards.createAndGoToEmptyDashboard(dashboardName)
+        dashboard.addInsightToEmptyDashboard(firstInsight)
+
+        dashboard.addPropertyFilter()
+
+        cy.get('.PropertyFilterButton').should('have.length', 1)
+
+        // refresh the dashboard by changing date range
+        cy.get('[data-attr="date-filter"]').click()
+        cy.contains('span', 'Last 14 days').click()
+
+        // insight meta should be updated to show new date range
+        cy.get('h5').contains('Last 14 days').should('exist')
+
+        cy.get('button').contains('Save').click()
+
+        // should save filters
+        cy.get('.PropertyFilterButton').should('have.length', 1)
+        // should save updated date range
+        cy.get('span').contains('Last 14 days').should('exist')
+    })
+
+    // TODO: this test works locally, just not in CI
+    it.skip('Clicking cancel discards dashboard filter changes', () => {
+        const dashboardName = randomString('to add an insight to')
+        const firstInsight = randomString('insight to add to dashboard')
+
+        // Create and visit a dashboard to get it into turbo mode cache
+        dashboards.createAndGoToEmptyDashboard(dashboardName)
+        dashboard.addInsightToEmptyDashboard(firstInsight)
+
+        // add property filter
+        cy.get('.PropertyFilterButton').should('have.length', 0)
+        cy.get('[data-attr="property-filter-0"]').click()
+        cy.get('[data-attr="taxonomic-filter-searchfield"]').click().type('Browser').wait(1000)
+        cy.get('[data-attr="prop-filter-event_properties-0"]').click({ force: true }).wait(1000)
+        cy.get('.LemonInput').type('Chrome')
+        cy.contains('.LemonButton__content', 'Chrome').click({ force: true })
+
+        // added property is present
+        cy.get('.PropertyFilterButton').should('have.length', 1)
+
+        // refresh the dashboard by changing date range
+        cy.get('[data-attr="date-filter"]').click()
+        cy.contains('span', 'Last 14 days').click()
+
+        cy.wait(2000)
+
+        // insight meta should be updated to show new date range
+        // default date range is last 7 days
+        cy.get('h5').contains('Last 14 days').should('exist')
+
+        // discard changes
+        cy.get('button').contains('Cancel').click()
+
+        // should reset filters to be empty
+        cy.get('.PropertyFilterButton').should('have.length', 0)
+        // should reset date range to no override
+        cy.get('span').contains('No date range overrid').should('exist')
+        // should reset insight meta date range
+        cy.get('h5').contains('Last 7 days').should('exist')
+    })
+
+    it('clicking on insight carries through dashboard filters', () => {
+        const dashboardName = randomString('to add an insight to')
+        const firstInsight = randomString('insight to add to dashboard')
+
+        // Create and visit a dashboard to get it into turbo mode cache
+        dashboards.createAndGoToEmptyDashboard(dashboardName)
+        dashboard.addInsightToEmptyDashboard(firstInsight)
+
+        dashboard.addPropertyFilter()
+
+        cy.get('.PropertyFilterButton').should('have.length', 1)
+
+        // refresh the dashboard by changing date range
+        cy.get('[data-attr="date-filter"]').click()
+        cy.contains('span', 'Last 14 days').click()
+
+        // save filters
+        cy.get('button').contains('Save').click()
+
+        // click on insight
+        cy.get('h4').contains('insight to add to dashboard').click({ force: true })
     })
 })

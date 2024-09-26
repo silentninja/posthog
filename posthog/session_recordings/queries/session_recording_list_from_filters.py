@@ -3,7 +3,7 @@ from typing import Any, NamedTuple, cast, Optional, Union
 from datetime import datetime, timedelta
 
 from posthog.hogql import ast
-from posthog.hogql.ast import Constant, CompareOperation
+from posthog.hogql.ast import CompareOperation
 from posthog.hogql.parser import parse_select
 from posthog.hogql.property import entity_to_expr, property_to_expr
 from posthog.hogql.query import execute_hogql_query
@@ -29,6 +29,10 @@ def is_person_property(p: Property) -> bool:
     return p.type == "person" or (p.type == "hogql" and "person.properties" in p.key)
 
 
+def is_group_property(p: Property) -> bool:
+    return p.type == "group"
+
+
 class SessionRecordingQueryResult(NamedTuple):
     results: list
     has_more_recording: bool
@@ -49,14 +53,15 @@ class SessionRecordingListFromFilters:
             max(s.max_last_timestamp) as end_time,
             dateDiff('SECOND', start_time, end_time) as duration,
             argMinMerge(s.first_url) as first_url,
-            sum(s.click_count),
-            sum(s.keypress_count),
-            sum(s.mouse_activity_count),
+            sum(s.click_count) as click_count,
+            sum(s.keypress_count) as keypress_count,
+            sum(s.mouse_activity_count) as mouse_activity_count,
             sum(s.active_milliseconds)/1000 as active_seconds,
             (duration - active_seconds) as inactive_seconds,
             sum(s.console_log_count) as console_log_count,
             sum(s.console_warn_count) as console_warn_count,
-            sum(s.console_error_count) as console_error_count
+            sum(s.console_error_count) as console_error_count,
+            {ongoing_selection}
         FROM raw_session_replay_events s
         WHERE {where_predicates}
         GROUP BY session_id
@@ -82,6 +87,7 @@ class SessionRecordingListFromFilters:
             "console_log_count",
             "console_warn_count",
             "console_error_count",
+            "ongoing",
         ]
 
         return [
@@ -130,6 +136,19 @@ class SessionRecordingListFromFilters:
         return parse_select(
             self.BASE_QUERY,
             {
+                # Check if the most recent _timestamp is within five minutes of the current time
+                # proxy for a live session
+                "ongoing_selection": ast.Alias(
+                    alias="ongoing",
+                    expr=ast.CompareOperation(
+                        left=ast.Call(name="max", args=[ast.Field(chain=["s", "_timestamp"])]),
+                        right=ast.Constant(
+                            # provided in a placeholder, so we can pass now from python to make tests easier 🙈
+                            value=datetime.utcnow() - timedelta(minutes=5),
+                        ),
+                        op=ast.CompareOperationOp.GtEq,
+                    ),
+                ),
                 "order_by": self._order_by_clause(),
                 "where_predicates": self._where_predicates(),
                 "having_predicates": self._having_predicates(),
@@ -137,15 +156,14 @@ class SessionRecordingListFromFilters:
         )
 
     def _order_by_clause(self) -> ast.Field:
-        order = self._filter.target_entity_order or "start_time"
-        return ast.Field(chain=[order])
+        return ast.Field(chain=[self._filter.order])
 
     def _where_predicates(self) -> Union[ast.And, ast.Or]:
         exprs: list[ast.Expr] = [
             ast.CompareOperation(
                 op=ast.CompareOperationOp.GtEq,
                 left=ast.Field(chain=["s", "min_first_timestamp"]),
-                right=ast.Constant(value=datetime.now() - timedelta(days=self.ttl_days)),
+                right=ast.Constant(value=datetime.utcnow() - timedelta(days=self.ttl_days)),
             )
         ]
 
@@ -213,36 +231,24 @@ class SessionRecordingListFromFilters:
             )
             optional_exprs.append(property_to_expr(remaining_properties, team=self._team, scope="replay"))
 
-        console_logs_predicates: list[ast.Expr] = []
-        if self._filter.console_logs_filter:
-            console_logs_predicates.append(
-                ast.CompareOperation(
-                    op=ast.CompareOperationOp.In,
-                    left=ast.Field(chain=["level"]),
-                    right=ast.Constant(value=self._filter.console_logs_filter),
-                )
-            )
-
-        if self._filter.console_search_query:
-            console_logs_predicates.append(
-                ast.CompareOperation(
-                    op=ast.CompareOperationOp.Gt,
-                    left=ast.Call(
-                        name="positionCaseInsensitive",
-                        args=[
-                            ast.Field(chain=["message"]),
-                            ast.Constant(value=self._filter.console_search_query),
-                        ],
-                    ),
-                    right=ast.Constant(value=0),
-                )
-            )
-
-        if console_logs_predicates:
+        if self._filter.console_log_filters.values:
             console_logs_subquery = ast.SelectQuery(
                 select=[ast.Field(chain=["log_source_id"])],
                 select_from=ast.JoinExpr(table=ast.Field(chain=["console_logs_log_entries"])),
-                where=self._filter.ast_operand(exprs=console_logs_predicates),
+                where=ast.And(
+                    exprs=[
+                        self._filter.ast_operand(
+                            exprs=[
+                                property_to_expr(self._filter.console_log_filters, team=self._team),
+                            ]
+                        ),
+                        ast.CompareOperation(
+                            op=ast.CompareOperationOp.Eq,
+                            left=ast.Field(chain=["log_source"]),
+                            right=ast.Constant(value="session_replay"),
+                        ),
+                    ]
+                ),
             )
 
             optional_exprs.append(
@@ -258,43 +264,14 @@ class SessionRecordingListFromFilters:
 
         return ast.And(exprs=exprs)
 
-    def _having_predicates(self) -> ast.And | Constant:
-        exprs: list[ast.Expr] = []
-
-        if self._filter.recording_duration_filter:
-            op = (
-                ast.CompareOperationOp.GtEq
-                if self._filter.recording_duration_filter.operator == "gt"
-                or self._filter.recording_duration_filter.operator == "gte"
-                else ast.CompareOperationOp.LtEq
-            )
-            exprs.append(
-                ast.CompareOperation(
-                    op=op,
-                    left=ast.Field(chain=[self._filter.duration_type_filter]),
-                    right=ast.Constant(value=self._filter.recording_duration_filter.value),
-                ),
-            )
-
-        if self._filter.snapshot_source_filter:
-            op = (
-                ast.CompareOperationOp.In
-                if self._filter.snapshot_source_filter.operator == "exact"
-                else ast.CompareOperationOp.NotIn
-            )
-            exprs.append(
-                ast.CompareOperation(
-                    op=op,
-                    left=ast.Call(name="argMinMerge", args=[ast.Field(chain=["s", "snapshot_source"])]),
-                    right=ast.Constant(value=self._filter.snapshot_source_filter.value),
-                ),
-            )
-
-        return ast.And(exprs=exprs) if exprs else ast.Constant(value=True)
+    def _having_predicates(self) -> ast.Expr:
+        return property_to_expr(self._filter.having_predicates, team=self._team, scope="replay")
 
     def _strip_person_and_event_properties(self, property_group: PropertyGroup) -> PropertyGroup | None:
         property_groups_to_keep = [
-            g for g in property_group.flat if not is_event_property(g) and not is_person_property(g)
+            g
+            for g in property_group.flat
+            if not is_event_property(g) and not is_person_property(g) and not is_group_property(g)
         ]
 
         return (
@@ -351,7 +328,7 @@ class PersonsPropertiesSubQuery:
     @cached_property
     def _where_predicates(self) -> ast.Expr:
         return (
-            property_to_expr(self.person_properties, team=self._team, scope="replay_pdi")
+            property_to_expr(self.person_properties, team=self._team)
             if self.person_properties
             else ast.Constant(value=True)
         )
@@ -390,7 +367,7 @@ class PersonsIdCompareOperation:
             return None
 
         # anchor to python now so that tests can freeze time
-        now = datetime.now()
+        now = datetime.utcnow()
 
         if poe_is_active(self._team):
             return parse_select(
@@ -473,7 +450,9 @@ class ReplayFiltersEventsSubQuery:
     def _select_from_events(self, select_expr: ast.Expr) -> ast.SelectQuery:
         return ast.SelectQuery(
             select=[select_expr],
-            select_from=ast.JoinExpr(table=ast.Field(chain=["events"])),
+            select_from=ast.JoinExpr(
+                table=ast.Field(chain=["events"]),
+            ),
             where=self._where_predicates(),
             having=self._having_predicates(),
             group_by=[ast.Field(chain=["$session_id"])],
@@ -481,7 +460,7 @@ class ReplayFiltersEventsSubQuery:
 
     def get_query_for_session_id_matching(self) -> ast.SelectQuery | ast.SelectUnionQuery | None:
         use_poe = poe_is_active(self._team) and self.person_properties
-        if self._filter.entities or self.event_properties or use_poe:
+        if self._filter.entities or self.event_properties or self.group_properties or use_poe:
             return self._select_from_events(ast.Alias(alias="session_id", expr=ast.Field(chain=["$session_id"])))
         else:
             return None
@@ -549,10 +528,14 @@ class ReplayFiltersEventsSubQuery:
 
         (event_where_exprs, _) = self._event_predicates
         if event_where_exprs:
-            exprs.append(self._filter.events_operand(exprs=event_where_exprs))
+            # we OR all events in the where and use hasAll / hasAny in the HAVING clause
+            exprs.append(ast.Or(exprs=event_where_exprs))
 
         if self.event_properties:
             exprs.append(property_to_expr(self.event_properties, team=self._team, scope="replay"))
+
+        if self.group_properties:
+            exprs.append(property_to_expr(self.group_properties, team=self._team))
 
         if self._team.person_on_events_mode and self.person_properties:
             exprs.append(property_to_expr(self.person_properties, team=self._team, scope="event"))
@@ -586,6 +569,10 @@ class ReplayFiltersEventsSubQuery:
     @cached_property
     def event_properties(self):
         return [g for g in self._filter.property_groups.flat if is_event_property(g)]
+
+    @cached_property
+    def group_properties(self):
+        return [g for g in self._filter.property_groups.flat if is_group_property(g)]
 
     @cached_property
     def person_properties(self) -> PropertyGroup | None:

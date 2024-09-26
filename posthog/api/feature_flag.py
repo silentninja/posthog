@@ -11,7 +11,7 @@ from rest_framework import (
     status,
     viewsets,
 )
-from rest_framework.decorators import action
+from posthog.api.utils import action
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -64,6 +64,8 @@ DATABASE_FOR_LOCAL_EVALUATION = (
 )
 
 BEHAVIOURAL_COHORT_FOUND_ERROR_CODE = "behavioral_cohort_found"
+
+MAX_PROPERTY_VALUES = 1000
 
 
 class FeatureFlagThrottle(BurstRateThrottle):
@@ -222,6 +224,16 @@ class FeatureFlagSerializer(TaggedItemSerializerMixin, serializers.HyperlinkedMo
 
             for property in condition.get("properties", []):
                 prop = Property(**property)
+                if isinstance(prop.value, list):
+                    upper_limit = MAX_PROPERTY_VALUES
+                    if settings.TEST:
+                        upper_limit = 10
+
+                    if len(prop.value) > upper_limit:
+                        raise serializers.ValidationError(
+                            f"Property group expressions of type {prop.key} cannot contain more than {upper_limit} values."
+                        )
+
                 if prop.type == "cohort":
                     try:
                         initial_cohort: Cohort = Cohort.objects.get(pk=prop.value, team_id=self.context["team_id"])
@@ -265,6 +277,17 @@ class FeatureFlagSerializer(TaggedItemSerializerMixin, serializers.HyperlinkedMo
 
         if not isinstance(payloads, dict):
             raise serializers.ValidationError("Payloads must be passed as a dictionary")
+
+        for value in payloads.values():
+            try:
+                if isinstance(value, str):
+                    json_value = json.loads(value)
+                else:
+                    json_value = value
+                json.dumps(json_value)
+
+            except json.JSONDecodeError:
+                raise serializers.ValidationError("Payload value is not valid JSON")
 
         if filters.get("multivariate"):
             if not all(key in variants for key in payloads):
@@ -537,7 +560,7 @@ class FeatureFlagViewSet(
     )
     def local_evaluation(self, request: request.Request, **kwargs):
         feature_flags: QuerySet[FeatureFlag] = FeatureFlag.objects.db_manager(DATABASE_FOR_LOCAL_EVALUATION).filter(
-            team_id=self.team_id, deleted=False, active=True
+            team__project_id=self.project_id, deleted=False, active=True
         )
 
         should_send_cohorts = "send_cohorts" in request.GET
@@ -758,4 +781,4 @@ class FeatureFlagViewSet(
 
 
 class LegacyFeatureFlagViewSet(FeatureFlagViewSet):
-    derive_current_team_from_user_only = True
+    param_derived_from_user_current_team = "project_id"

@@ -1,6 +1,7 @@
 import posthogEE from '@posthog/ee/exports'
-import { customEvent, EventType, eventWithTime } from '@rrweb/types'
-import { captureException } from '@sentry/react'
+import { customEvent, EventType, eventWithTime, fullSnapshotEvent, IncrementalSource } from '@rrweb/types'
+import { captureException, captureMessage } from '@sentry/react'
+import { gunzipSync, strFromU8, strToU8 } from 'fflate'
 import {
     actions,
     afterMount,
@@ -21,11 +22,14 @@ import api from 'lib/api'
 import { FEATURE_FLAGS } from 'lib/constants'
 import { Dayjs, dayjs } from 'lib/dayjs'
 import { featureFlagLogic, FeatureFlagsSet } from 'lib/logic/featureFlagLogic'
+import { isObject } from 'lib/utils'
 import { chainToElements } from 'lib/utils/elements-chain'
 import { eventUsageLogic } from 'lib/utils/eventUsageLogic'
 import posthog from 'posthog-js'
+import { compressedEventWithTime } from 'posthog-js/lib/src/extensions/replay/sessionrecording'
 
-import { NodeKind } from '~/queries/schema'
+import { HogQLQuery, NodeKind } from '~/queries/schema'
+import { hogql } from '~/queries/utils'
 import {
     AnyPropertyFilter,
     EncodedRecordingSnapshot,
@@ -62,6 +66,116 @@ function isRecordingSnapshot(x: unknown): x is RecordingSnapshot {
     return typeof x === 'object' && x !== null && 'type' in x && 'timestamp' in x
 }
 
+/*
+ there was a bug in mobile SDK that didn't consistently send a meta event with a full snapshot.
+ rrweb player hides itself until it has seen the meta event 🤷
+ but we can patch a meta event into the recording data to make it work
+*/
+function patchMetaEventIntoMobileData(parsedLines: RecordingSnapshot[]): RecordingSnapshot[] {
+    let fullSnapshotIndex: number = -1
+    let metaIndex: number = -1
+    try {
+        fullSnapshotIndex = parsedLines.findIndex((l) => l.type === EventType.FullSnapshot)
+        metaIndex = parsedLines.findIndex((l) => l.type === EventType.Meta)
+
+        // then we need to patch the meta event into the snapshot data
+        if (fullSnapshotIndex > -1 && metaIndex === -1) {
+            const fullSnapshot = parsedLines[fullSnapshotIndex] as RecordingSnapshot & fullSnapshotEvent & eventWithTime
+            // a full snapshot (particularly from the mobile transformer) has a relatively fixed structure,
+            // but the types exposed by rrweb don't quite cover what we need , so...
+            const mainNode = fullSnapshot.data.node as any
+            const targetNode = mainNode.childNodes[1].childNodes[1].childNodes[0]
+            const { width, height } = targetNode.attributes
+            const metaEvent: RecordingSnapshot = {
+                windowId: fullSnapshot.windowId,
+                type: EventType.Meta,
+                timestamp: fullSnapshot.timestamp,
+                data: {
+                    href: getHrefFromSnapshot(fullSnapshot) || '',
+                    width,
+                    height,
+                },
+            }
+            parsedLines.splice(fullSnapshotIndex, 0, metaEvent)
+        }
+    } catch (e) {
+        captureException(e, {
+            tags: { feature: 'session-recording-missing-meta-patching' },
+            extra: { fullSnapshotIndex, metaIndex },
+        })
+    }
+
+    return parsedLines
+}
+
+function hasAnyWireframes(snapshotData: Record<string, any>[]): boolean {
+    return snapshotData.some((d) => {
+        return isObject(d.data) && 'wireframes' in d.data
+    })
+}
+
+function isCompressedEvent(ev: unknown): ev is compressedEventWithTime {
+    return typeof ev === 'object' && ev !== null && 'cv' in ev
+}
+
+function unzip(compressedStr: string): any {
+    return JSON.parse(strFromU8(gunzipSync(strToU8(compressedStr, true))))
+}
+
+function decompressEvent(ev: eventWithTime | compressedEventWithTime): eventWithTime {
+    try {
+        if (isCompressedEvent(ev)) {
+            if (ev.cv === '2024-10') {
+                if (ev.type === EventType.FullSnapshot) {
+                    return {
+                        ...ev,
+                        data: unzip(ev.data),
+                    }
+                } else if (ev.type === EventType.IncrementalSnapshot) {
+                    if (ev.data.source === IncrementalSource.StyleSheetRule) {
+                        return {
+                            ...ev,
+                            data: {
+                                ...ev.data,
+                                source: IncrementalSource.StyleSheetRule,
+                                adds: unzip(ev.data.adds),
+                                removes: unzip(ev.data.removes),
+                            },
+                        }
+                    } else if (ev.data.source === IncrementalSource.Mutation) {
+                        return {
+                            ...ev,
+                            data: {
+                                ...ev.data,
+                                source: IncrementalSource.Mutation,
+                                adds: unzip(ev.data.adds),
+                                removes: unzip(ev.data.removes),
+                                texts: unzip(ev.data.texts),
+                                attributes: unzip(ev.data.attributes),
+                            },
+                        }
+                    }
+                }
+            } else {
+                posthog.captureException(new Error('Unknown compressed event version'), {
+                    feature: 'session-recording-compressed-event-decompression',
+                    compressedEvent: ev,
+                    compressionVersion: ev.cv,
+                })
+                // probably unplayable but we don't know how to decompress it
+                return ev as eventWithTime
+            }
+        }
+        return ev as eventWithTime
+    } catch (e) {
+        posthog.captureException((e as Error) || new Error('Cound not decompress event'), {
+            feature: 'session-recording-compressed-event-decompression',
+            compressedEvent: ev,
+        })
+        return ev as eventWithTime
+    }
+}
+
 export const parseEncodedSnapshots = async (
     items: (RecordingSnapshot | EncodedRecordingSnapshot | string)[],
     sessionId: string,
@@ -71,9 +185,12 @@ export const parseEncodedSnapshots = async (
     if (!postHogEEModule) {
         postHogEEModule = await posthogEE()
     }
+
     const lineCount = items.length
     const unparseableLines: string[] = []
-    const parsedLines = items.flatMap((l) => {
+    let isMobileSnapshots = false
+
+    const parsedLines: RecordingSnapshot[] = items.flatMap((l) => {
         if (!l) {
             // blob files have an empty line at the end
             return []
@@ -82,10 +199,16 @@ export const parseEncodedSnapshots = async (
             const snapshotLine = typeof l === 'string' ? (JSON.parse(l) as EncodedRecordingSnapshot) : l
             const snapshotData = isRecordingSnapshot(snapshotLine) ? [snapshotLine] : snapshotLine['data']
 
+            if (!isMobileSnapshots) {
+                isMobileSnapshots = hasAnyWireframes(snapshotData)
+            }
+
             return snapshotData.map((d: unknown) => {
-                const snap = withMobileTransformer
-                    ? postHogEEModule?.mobileReplay?.transformEventToWeb(d) || (d as eventWithTime)
-                    : (d as eventWithTime)
+                const snap = decompressEvent(
+                    withMobileTransformer
+                        ? postHogEEModule?.mobileReplay?.transformEventToWeb(d) || (d as eventWithTime)
+                        : (d as eventWithTime)
+                )
                 return {
                     // this handles parsing data that was loaded from blob storage "window_id"
                     // and data that was exported from the front-end "windowId"
@@ -117,11 +240,13 @@ export const parseEncodedSnapshots = async (
         })
     }
 
-    return parsedLines
+    return isMobileSnapshots ? patchMetaEventIntoMobileData(parsedLines) : parsedLines
 }
 
-const getHrefFromSnapshot = (snapshot: RecordingSnapshot): string | undefined => {
-    return (snapshot.data as any)?.href || (snapshot.data as any)?.payload?.href
+const getHrefFromSnapshot = (snapshot: unknown): string | undefined => {
+    return isObject(snapshot) && 'data' in snapshot
+        ? (snapshot.data as any)?.href || (snapshot.data as any)?.payload?.href
+        : undefined
 }
 
 /*
@@ -486,23 +611,34 @@ export const sessionRecordingDataLogic = kea<sessionRecordingDataLogicType>([
                         return values.sessionEventsData
                     }
 
-                    const { person } = values.sessionPlayerData
+                    if (!event.id) {
+                        captureMessage('event id not available for matching', {
+                            tags: { feature: 'session-recording-load-full-event-data' },
+                            extra: { event },
+                        })
+                        return values.sessionEventsData
+                    }
 
                     let loadedProperties: Record<string, any> = existingEvent.properties
-                    // TODO: Move this to an optimised HogQL query when available...
-                    try {
-                        const res: any = await api.query({
-                            kind: 'EventsQuery',
-                            select: ['properties', 'timestamp'],
-                            orderBy: ['timestamp ASC'],
-                            limit: 100,
-                            personId: String(person?.id),
-                            after: dayjs(event.timestamp).subtract(1000, 'ms').format(),
-                            before: dayjs(event.timestamp).add(1000, 'ms').format(),
-                            event: existingEvent.event,
-                        })
 
-                        const result = res.results.find((x: any) => x[1] === event.timestamp)
+                    try {
+                        const query: HogQLQuery = {
+                            kind: NodeKind.HogQLQuery,
+                            query: hogql`SELECT properties, uuid
+                                         FROM events
+                                         WHERE timestamp > ${dayjs(event.timestamp).subtract(1000, 'ms')}
+                                           AND timestamp < ${dayjs(event.timestamp).add(1000, 'ms')}
+                                           AND event = ${event.event}
+                                           AND uuid = ${event.id}`,
+                        }
+                        const response = await api.query(query)
+                        if (response.error) {
+                            throw new Error(response.error)
+                        }
+
+                        const result = response.results.find((x: any) => {
+                            return x[1] === event.id
+                        })
 
                         if (result) {
                             loadedProperties = JSON.parse(result[0])
@@ -512,7 +648,9 @@ export const sessionRecordingDataLogic = kea<sessionRecordingDataLogicType>([
                     } catch (e) {
                         // NOTE: This is not ideal but should happen so rarely that it is tolerable.
                         existingEvent.fullyLoaded = true
-                        captureException(e)
+                        captureException(e, {
+                            tags: { feature: 'session-recording-load-full-event-data' },
+                        })
                     }
 
                     // here we map the events list because we want the result to be a new instance to trigger downstream recalculation
@@ -881,12 +1019,10 @@ export const sessionRecordingDataLogic = kea<sessionRecordingDataLogicType>([
                 if (everyWindowMissingFullSnapshot) {
                     // video is definitely unplayable
                     posthog.capture('recording_has_no_full_snapshot', {
-                        ...windowsHaveFullSnapshot,
                         sessionId: sessionRecordingId,
                     })
                 } else if (anyWindowMissingFullSnapshot) {
                     posthog.capture('recording_window_missing_full_snapshot', {
-                        ...windowsHaveFullSnapshot,
                         sessionId: sessionRecordingId,
                     })
                 }
